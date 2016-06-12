@@ -1,0 +1,9 @@
+[package]
+name = "packer"
+version = "0.1.0"
+authors = ["bryan"]
+
+[dependencies]
+tar = "0.3.4"
+flate2 = "0.2.14"
+md5 = "0.1.1"
