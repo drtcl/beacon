@@ -1,0 +1,18 @@
+[package]
+name = "httpsearch"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "httpsearch"
+
+[[bin]]
+name = "httpsearch"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.70"
+reqwest = { version = "0.11.14", features = ["blocking", "stream"] }
+scraper = "0.14.0"
+#tokio = { version = "1", freatures = ["full"] }
