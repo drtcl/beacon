@@ -1,0 +1,13 @@
+[package]
+name = "hashdir"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.70"
+blake2 = "0.9.2"
+clap = "4.2.5"
+jwalk = "0.8.1"
+rayon = "1.6.0"

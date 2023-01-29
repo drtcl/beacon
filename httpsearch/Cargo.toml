@@ -14,5 +14,5 @@ name = "httpsearch"
 [dependencies]
 anyhow = "1.0.70"
 reqwest = { version = "0.11.14", features = ["blocking", "stream"] }
-scraper = "0.14.0"
+scraper = "0.15.0"
 #tokio = { version = "1", freatures = ["full"] }

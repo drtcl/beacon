@@ -52,6 +52,30 @@ type FilePath = String;
 type FileHash = String;
 type FileHashes = HashMap<FilePath, FileHash>;
 
+pub fn get_mountpoint(pkg_file: &mut File) -> AResult<Option<String>> {
+
+    pkg_file.rewind()?;
+    let mut tar = tar::Archive::new(pkg_file);
+    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
+
+    let mut contents = String::new();
+    meta.read_to_string(&mut contents)?;
+
+    let toml = toml::from_str::<toml::Value>(contents.as_str()).unwrap();
+    let toml = toml.get("package").context("malformed metadata")?;
+    //dbg!(&toml);
+
+    match toml.get("mount") {
+        Some(v) => {
+            let mountpoint = v.as_str().context("mount value is not a string")?;
+            return Ok(Some(mountpoint.to_string()));
+        },
+        None => {
+            return Ok(None);
+        }
+    }
+}
+
 pub fn get_filelist(pkg_file: &mut File) -> AResult<FileHashes> {
     pkg_file.rewind()?;
     let mut tar = tar::Archive::new(pkg_file);

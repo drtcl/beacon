@@ -33,6 +33,9 @@ impl Db {
     }
 
     pub fn add_package(&mut self, pkg: DbPkg) {
+        self.installed.retain(|p| {
+            p.id.name != pkg.id.name
+        });
         self.installed.push(pkg);
     }
 

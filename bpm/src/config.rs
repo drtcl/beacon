@@ -5,7 +5,7 @@ use crate::source;
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 
 #[derive(Debug, Serialize)]
 pub enum Provider {
@@ -18,8 +18,21 @@ pub enum Provider {
 #[derive(Debug, Serialize)]
 pub struct Config {
     pub cache_dir: PathBuf,
-    pub providers: Vec<(String, Provider)>,
     pub db_file: PathBuf,
+    pub use_default_target: bool,
+    pub providers: Vec<(String, Provider)>,
+    pub mount: Vec<(String, PathBuf)>,
+}
+
+impl Config {
+    pub fn get_mountpoint(&self, name: &str) -> Option<PathBuf> {
+        for (n, p) in &self.mount {
+            if name == n {
+                return Some(p.clone());
+            }
+        }
+        return None;
+    }
 }
 
 fn serialize_filesystem<S: serde::Serializer>(
@@ -84,16 +97,46 @@ impl Provider {
 #[derive(Debug, Deserialize)]
 #[serde(rename = "bpm")]
 pub struct ConfigToml {
-    cache_dir: PathBuf,
+    cache_dir: String,
+    database: String,
+    use_default_target: bool,
     providers: toml::value::Table,
-    database: PathBuf,
+    mount: toml::value::Table,
 }
 
-pub fn parse(path: &str) -> AResult<Config> {
-    let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+pub fn parse_path<P: AsRef<Path>>(path: P) -> AResult<Config> {
+    let file = std::fs::File::open(path.as_ref())?;
+    let r = std::io::BufReader::new(file);
+    parse_read(r)
+}
+
+pub fn parse_read<R: Read>(mut read: R) -> AResult<Config> {
     let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    let toml = toml::from_str::<ConfigToml>(&contents).context("failed to parse toml config file")?;
+    read.read_to_string(&mut contents)?;
+    let toml = toml::from_str::<ConfigToml>(&contents).context("failed to parse config.toml")?;
+
+    let cache_dir = path_replace(toml.cache_dir);
+    let db_file = path_replace(toml.database);
+    //let use_default_target = toml.
+
+    let mut mounts = Vec::new();
+    for mount in toml.mount.into_iter() {
+        match mount {
+            (name, toml::Value::String(ref val)) => {
+                let path = path_replace(val);
+                if !path.exists() {
+                    eprintln!("warning: mount '{}', path '{}' does not exist", name, path.display());
+                } else {
+                    //let canon = path.canonicalize().expect("failed to canonicalize path");
+                    //println!("canon {:?}", canon);
+                }
+                mounts.push((name, path));
+            },
+            (name, _) => {
+                return Err(anyhow::anyhow!("invalid mount {}", name));
+            }
+        }
+    }
 
     let mut providers: Vec<(String, Provider)> = Vec::new();
     for p in toml.providers.into_iter() {
@@ -108,10 +151,29 @@ pub fn parse(path: &str) -> AResult<Config> {
     }
 
     let config = Config {
-        cache_dir: toml.cache_dir,
-        db_file: toml.database,
+        cache_dir,
+        db_file,
         providers,
+        mount: mounts,
+        use_default_target: toml.use_default_target,
     };
 
+    //dbg!(&config);
+
     Ok(config)
+}
+
+/// replace variables within a path
+/// - `${BPM}` => dir of bpm binary
+fn path_replace<S: Into<String>>(path: S) -> PathBuf {
+
+    let mut path = path.into();
+
+    if path.find("${BPM}").is_some() {
+        let cur_exe = std::env::current_exe().expect("failed to get current exe path");
+        let exe_dir = cur_exe.parent().unwrap().to_str().unwrap();
+        path = path.replace("${BPM}", exe_dir);
+    }
+
+    PathBuf::from(path)
 }

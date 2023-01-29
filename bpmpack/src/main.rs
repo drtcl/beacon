@@ -1,57 +1,25 @@
-//TODO 
+//TODO
 // - should refuse to overwrite existing package files
 // - use semver for the version number, validate it?
-// - dependencies 
+// - dependencies
 // - package recipies
 //   - ignore files
 //   - package descriptions
 //   - README / docs for packages
 
-//#![allow(dead_code)]
-//#![allow(unused_imports)]
-//#![allow(unused_variables)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
 
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-
+use anyhow::{Context, Result};
 use blake2::{Blake2b, Digest};
-use clap::Arg;
-use semver::{Error as SemVerError, Version};
+use clap::{Arg, ArgAction};
+use indicatif::ProgressBar;
+use semver::Version;
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-#[derive(Debug)]
-struct Error {
-    error: String,
-    kind: std::io::ErrorKind,
-}
-
-impl From<&str> for Error {
-    fn from(error: &str) -> Self {
-        Self {
-            error: error.to_string(),
-            kind: std::io::ErrorKind::Other,
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Self {
-            error: e.to_string(),
-            kind: e.kind(),
-        }
-    }
-}
-
-impl From<SemVerError> for Error {
-    fn from(e: SemVerError) -> Self {
-        Self {
-            error: e.to_string(),
-            kind: std::io::ErrorKind::Other,
-        }
-    }
-}
-
-//
 // take a list of files
 // save them into a data tarball
 // hash the tarball
@@ -61,29 +29,18 @@ impl From<SemVerError> for Error {
 // cleanup intermediate files
 //
 
-//fn is_int(v: String) -> Result<(), String> {
-//    if v.parse::<u32>().is_ok() {
-//        return Ok(());
-//    } else {
-//        return Err(String::from("integer value required"));
-//    }
-//}
-
-//fn rebase_path<P>(root: P, path: P) -> PathBuf
-//where
-//    P: AsRef<Path>,
-//{
-//    //print!("  rebase {:?} {:?}", root, &path);
-//    let path = path.as_ref().strip_prefix(root).unwrap().to_path_buf();
-//    //println!(" -> {:?}", &path);
-//    PathBuf::from(path)
-//}
+#[derive(Debug)]
+enum FileType {
+    Dir,
+    File,
+    Link(PathBuf),
+}
 
 #[derive(Debug)]
 struct FileEntry {
     full_path: PathBuf,
-    rel_path: PathBuf,
-    dir: bool,
+    pkg_path: PathBuf,
+    file_type: FileType,
     hash: Option<String>,
 }
 
@@ -101,30 +58,58 @@ impl FileListing {
     }
 }
 
-fn file_discovery(root_dir: &Path) -> FileListing {
-    let path_prefix = root_dir.parent();
+fn file_discovery(paths: Vec<String>) -> FileListing {
+
+    let mut walker = ignore::WalkBuilder::new(paths.iter().next().unwrap());
+    for path in paths.iter().skip(1) {
+        walker.add(path);
+    }
+
+    walker.standard_filters(false);
+    walker.git_ignore(false);
 
     let mut files = Vec::new();
-    for entry in walkdir::WalkDir::new(root_dir).sort_by_file_name() {
+
+    let root = PathBuf::from(paths.iter().next().unwrap());
+    let root_parent = root.parent().unwrap();
+
+    for entry in walker.build() {
         let entry = entry.unwrap();
+        //dbg!(&entry);
         let full_path = PathBuf::from(entry.path());
-        let rel_path = full_path
-            .strip_prefix(path_prefix.unwrap())
-            .unwrap()
-            .to_path_buf();
+        let pkg_path = full_path.strip_prefix(root_parent).unwrap().to_path_buf();
+        let ent_file_type = entry.file_type().expect("can't determine file type");
+        let full_path = canonicalize_no_symlink(&full_path).unwrap();
+
+        let file_type = {
+            if ent_file_type.is_dir() {
+                FileType::Dir
+            } else if ent_file_type.is_file() {
+                FileType::File
+            } else if ent_file_type.is_symlink() {
+                let link_to = std::fs::read_link(&full_path).unwrap();
+                FileType::Link(link_to)
+            } else {
+                unreachable!("path is not a dir, file, or link")
+            }
+        };
+
         files.push(FileEntry {
             full_path,
-            rel_path,
-            dir: entry.file_type().is_dir(),
+            pkg_path,
+            file_type,
             hash: None,
         });
     }
 
-    return FileListing { files };
+    FileListing { files }
 }
 
-fn main() -> Result<(), Error> {
+fn cwd() -> PathBuf {
+    std::env::current_dir().expect("failed to get current dir")
+}
 
+fn main() -> Result<()> {
     let matches = clap::Command::new("bpm-pack")
         .version("0.1.0")
         .about("Bryan's Package Manager : bpm-pack : package creation utility")
@@ -133,7 +118,7 @@ fn main() -> Result<(), Error> {
         .arg(
             Arg::new("no-cleanup")
                 .long("no-cleanup")
-                .action(clap::ArgAction::SetTrue),
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("name")
@@ -152,15 +137,31 @@ fn main() -> Result<(), Error> {
             Arg::new("verbose")
                 .long("verbose")
                 .required(false)
-                .default_value("0")
-                .help("verbosity level"), //.validator(is_int)
+                .action(ArgAction::SetTrue), //.default_value("0")
+                                             //.help("verbosity level"), //.validator(is_int)
         )
-        //.arg(
-        //    Arg::new("depend")
-        //        .long("--depend")
-        //        .action(clap::ArgAction::Append)
-        //        .help("define a dependency"),
-        //)
+        .arg(
+            Arg::new("ignore-file")
+                .long("ignore-file")
+                .value_hint(clap::ValueHint::FilePath)
+                .value_name("path")
+                .required(false), //.default_value("")
+        )
+        .arg(Arg::new("mount").long("mount").required(true))
+        .arg(
+            Arg::new("output-dir")
+                .long("output-dir")
+                .short('o')
+                .value_name("dir")
+                .required(false), //.default_value("`cwd`")
+        )
+        .arg(
+            Arg::new("depend")
+                .long("depend")
+                .action(clap::ArgAction::Append)
+                .value_name("pkg[@version]")
+                .help("Add a dependency"),
+        )
         .arg(
             Arg::new("file")
                 .action(clap::ArgAction::Append)
@@ -168,86 +169,183 @@ fn main() -> Result<(), Error> {
         )
         .get_matches();
 
+    let mount = matches.get_one::<String>("mount").unwrap();
+
     // the version must be of the right semver format
     let package_version_str = matches.get_one::<String>("version").unwrap();
     let package_version = Version::parse(package_version_str).expect("invalid version");
 
     let package_name = matches.get_one::<String>("name").unwrap();
 
-    //let verbosity = matches.get_one("verbose").unwrap().parse::<u32>().unwrap();
+    let verbose = *matches.get_one::<bool>("verbose").unwrap();
 
     //let root_dir = matches.get_one::<String>("root").unwrap();
     //let root_dir = std::fs::canonicalize(root_dir).expect("failed to canonicalize root dir");
     //dbg!(&root_dir);
 
-    let cache_dir = Path::new("./bpm_cache/");
+//    // create the cache directory if it doesn't exist
+//    let cache_dir = Path::new("./bpm_cache/");
+//    if !cache_dir.exists() {
+//        std::fs::create_dir(cache_dir)?; // error: failed to create cache directory
+//    }
 
-    // create the cache directory if it doesn't exist
-    if !cache_dir.exists() {
-        std::fs::create_dir(cache_dir)?; // error: failed to create cache directory
-    }
+//    let ignore_file = matches.get_one::<String>("ignore-file");
+//    if let Some(ignore_file) = ignore_file {
+//        let ignore_file = Path::new(ignore_file);
+//        if !ignore_file.exists() {
+//            anyhow::bail!("ignore-file does not exist");
+//        }
+//        //let ig = ignore::gitignore::GitignoreBuilder::new(
+//        //let read = std::io::BufReader::new(std::fs::File::open(ignore_file)?);
+//        //for line in read.lines() {
+//        //    let line = line?;
+//        //    //println!("read line {line}");
+//        //}
+//    }
+
+    let output_dir = match matches.get_one::<String>("output-dir") {
+        None => cwd(),
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !path.exists() {
+                anyhow::bail!("output-dir path does not exist");
+            }
+            path
+        }
+    };
 
     // the file names
     // - data - all target file in the package
     // - meta - meta data about data files
 
     let mut tarball_file_path = PathBuf::new();
-    tarball_file_path.push(cache_dir);
+    tarball_file_path.push(&output_dir);
     tarball_file_path.push("data.tar.zst");
 
     let mut meta_file_path = PathBuf::new();
-    meta_file_path.push(cache_dir);
+    meta_file_path.push(&output_dir);
     meta_file_path.push("meta.toml");
 
     let mut package_file_path = PathBuf::new();
-    package_file_path.push(cache_dir);
+    package_file_path.push(&output_dir);
     package_file_path.push(format!("{}-{}.bpm.tar", package_name, package_version));
 
-    let mut file_listing = FileListing::new();
-    for path in matches.get_many::<String>("file").unwrap() {
-        file_listing.extend(file_discovery(&PathBuf::from(path)));
-    }
+    //    let mut file_listing = FileListing::new();
+    //    for path in matches.get_many::<String>("file").unwrap() {
+    //        file_listing.extend(file_discovery(&PathBuf::from(path)));
+    //    }
+
+    // -- begin work --
+
+    let mut file_listing = file_discovery(
+        matches
+            .get_many::<String>("file")
+            .unwrap()
+            .cloned()
+            .collect(),
+    );
+    //dbg!(&file_listing);
+
+    // scan the file list and verify symlinks
+    //verify_symlinks(&file_listing);
 
     let data_tar_file = std::fs::File::create(tarball_file_path.as_path())?;
     let data_tar_file = std::io::BufWriter::new(data_tar_file);
-    let mut data_tar_hasher = HashingWriter {
-        inner: data_tar_file,
-        hasher: Blake2b::new(),
-    };
-    let mut data_tar_file = zstd::stream::write::Encoder::new(&mut data_tar_hasher, 21)?;
+    let mut data_tar_hasher = HashingWriter::new(data_tar_file, Blake2b::new());
+    let mut data_tar_file =
+        zstd::stream::write::Encoder::new(&mut data_tar_hasher, 29)?.auto_finish();
+    //zstd::stream::write::Encoder::new(&mut data_tar_hasher, 21)?.auto_finish();
     let mut data_tar = tar::Builder::new(&mut data_tar_file);
+    data_tar.follow_symlinks(false);
+
+    let pb = ProgressBar::new(file_listing.files.len() as u64);
+    pb.set_style(
+        indicatif::ProgressStyle::with_template(
+            "{spinner} [{wide_bar:.blue/white}] {pos}/{len} {elapsed} {eta}",
+        )
+        //.progress_chars("█▇▆▅▄▃▂▁ █")
+        .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(200));
+
+    let slow = file_listing.files.len() < 20;
+    let slow = false;
 
     // create the target install files tar file
     for entry in &mut file_listing.files {
-        if entry.dir {
-            data_tar.append_dir(&entry.rel_path, &entry.full_path)?;
-        } else {
-            let fd = std::fs::File::open(&entry.full_path)?;
-            //let file_size = fd.metadata()?.len();
+        match entry.file_type {
+            FileType::Dir => {
+                data_tar.append_dir(&entry.pkg_path, &entry.full_path).context("inserting dir")?;
+                if verbose {
+                    //println!("Ad\t{}/", entry.pkg_path.display());
+                    pb.suspend(|| println!("Ad\t{}/", entry.pkg_path.display()));
+                }
+            }
+            FileType::File => {
+                let fd = std::fs::File::open(&entry.full_path).context("opening file")?;
+                //let file_size = fd.metadata()?.len();
 
-            let mut header = tar::Header::new_gnu();
-            header.set_metadata_in_mode(&fd.metadata()?, tar::HeaderMode::Complete);
-            //header.set_size(file_size);
-            //header.set_cksum();
+                let mut header = tar::Header::new_gnu();
+                header.set_metadata_in_mode(
+                    &fd.metadata().context("getting metadata")?,
+                    tar::HeaderMode::Complete,
+                );
+                //header.set_size(file_size);
+                //header.set_cksum();
 
-            let hasher = Blake2b::new();
-            let mut reader = HashingReader {
-                inner: std::io::BufReader::new(fd),
-                hasher,
-            };
+                let fd = std::io::BufReader::new(fd);
+                let mut reader = HashingReader::new(fd, Blake2b::new());
 
-            data_tar.append_data(&mut header, &entry.rel_path, &mut reader)?;
-            let hash = reader.hasher.finalize();
-            entry.hash = Some(hex_string(hash.as_slice()));
+                data_tar.append_data(&mut header, &entry.pkg_path, &mut reader).context("inserting file")?;
+                let (_, hasher) = reader.into_parts();
+                let hash = hasher.finalize();
+                entry.hash = Some(hex_string(hash.as_slice()));
+
+                if verbose {
+                    pb.suspend(|| {
+                        println!(
+                            //"A\t{:-10}\t{}",
+                            "A\t{:-10}",
+                            entry.pkg_path.display(),
+                            //hex_string(hash.as_slice())
+                        )
+                    });
+                    //println!("A\t{:-10}\t{}", entry.pkg_path.display(), hex_string(hash.as_slice()));
+                    //println!("A\t{}", entry.pkg_path.display());
+                }
+            }
+            FileType::Link(ref link_path) => {
+                //dbg!(&entry);
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                data_tar.append_link(&mut header, &entry.pkg_path, &link_path).context("inserting symlink")?;
+
+                if verbose {
+                    pb.suspend(|| println!("A l\t{}/", entry.pkg_path.display()));
+                    //println!("A l\t{}/", entry.pkg_path.display());
+                }
+
+                //todo!("handle symlinks");
+            }
         }
+
+        pb.inc(1);
+        if slow {
+            std::thread::sleep(Duration::from_millis(300));
+        } //TODO dd
     }
+    pb.finish_and_clear();
 
     data_tar.finish()?;
     drop(data_tar);
     data_tar_file.flush()?;
     drop(data_tar_file);
 
-    let data_tar_hash = hex_string(data_tar_hasher.hasher.finalize().as_slice());
+    let (_, hasher) = data_tar_hasher.into_parts();
+    let data_tar_hash = hex_string(hasher.finalize().as_slice());
+
+    //let data_tar_hash = hex_string(data_tar_hasher.hasher.finalize().as_slice());
     //println!("data tar hash {}", &data_tar_hash);
 
     let deps: Vec<(String, String)> = Vec::new();
@@ -274,6 +372,7 @@ fn main() -> Result<(), Error> {
             "data_cksum".into(),
             toml::value::Value::String(data_tar_hash),
         );
+        package_table.insert("mount".into(), toml::value::Value::String(mount.clone()));
 
         map.insert("package".into(), toml::value::Value::Table(package_table));
 
@@ -289,11 +388,11 @@ fn main() -> Result<(), Error> {
         writeln!(&mut metafile, "[files]")?;
         for entry in &mut file_listing.files {
             if let Some(ref hash) = entry.hash {
-                //println!("\"{}\" = \"{}\"\n", &entry.rel_path.display(), hash);
+                //println!("\"{}\" = \"{}\"\n", &entry.pkg_path.display(), hash);
                 write!(
                     &mut metafile,
                     "\"{}\" = \"{}\"\n",
-                    &entry.rel_path.display(),
+                    &entry.pkg_path.display(),
                     hash
                 )?;
             }
@@ -355,6 +454,15 @@ impl<Inner: Read, Hasher: Digest> std::io::Read for HashingReader<Inner, Hasher>
     }
 }
 
+impl<Inner, Hasher> HashingReader<Inner, Hasher> {
+    fn new(inner: Inner, hasher: Hasher) -> Self {
+        Self { inner, hasher }
+    }
+    fn into_parts(self) -> (Inner, Hasher) {
+        (self.inner, self.hasher)
+    }
+}
+
 struct HashingWriter<Inner, Hasher> {
     hasher: Hasher,
     inner: Inner,
@@ -372,3 +480,80 @@ impl<Inner: Write, Hasher: Digest> std::io::Write for HashingWriter<Inner, Hashe
         self.inner.flush()
     }
 }
+
+impl<Inner, Hasher> HashingWriter<Inner, Hasher> {
+    fn new(inner: Inner, hasher: Hasher) -> Self {
+        Self { inner, hasher }
+    }
+    fn into_parts(self) -> (Inner, Hasher) {
+        (self.inner, self.hasher)
+    }
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    let mut ret = PathBuf::new();
+    for i in path.iter() {
+        dbg!(&i);
+        if i == ".." {
+            ret.pop();
+        } else if i == "." {
+        } else {
+            ret.push(i);
+        }
+    }
+    dbg!(&ret);
+    ret
+}
+
+fn canonicalize_no_symlink(path: &Path) -> Result<PathBuf> {
+    if path.is_symlink() {
+        return Ok(path
+            .parent()
+            .unwrap()
+            .canonicalize()?
+            .join(path.file_name().unwrap()));
+    }
+
+    Ok(path.canonicalize()?)
+}
+
+//fn verify_symlinks(FileListing { files }: &FileListing) -> Result<()> {
+//    dbg!(files);
+//
+//    for file_entry in files {
+//        if let FileType::Link(ref link_content) = file_entry.file_type {
+//            let link_pkg_path = if link_content.is_relative() {
+//                file_entry
+//                    .pkg_path
+//                    .parent()
+//                    .unwrap()
+//                    .join(link_content)
+//                    .canonicalize()?
+//            } else {
+//                link_content
+//                    .canonicalize()
+//                    .context("failed to canonicalize link path")?
+//            };
+//
+//            println!(
+//                "LINK {:?} [{:?}] -> {:?}",
+//                file_entry.pkg_path, link_content, link_pkg_path
+//            );
+//            //let link_pkg_path = normalize_path(link_pkg_path);
+//            //println!("?LINK {:?} [{:?}] -> {:?}", file_entry.pkg_path, link_content, link_pkg_path);
+//
+//            let iter = files.iter().find(|v| {
+//                println!("checking {:?} == {:?}", link_content, v);
+//                &v.pkg_path == &link_pkg_path
+//            });
+//
+//            if iter.is_none() {
+//                println!(
+//                    "WARNING: symlink {:?} -> {:?} points outsize of package",
+//                    file_entry.pkg_path, link_pkg_path
+//                );
+//            }
+//        }
+//    }
+//    Ok(())
+//}
