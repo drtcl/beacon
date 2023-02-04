@@ -1,0 +1,10 @@
+cache_dir = "${BPM}/../../crates/bpm/cache"
+database = "${BPM}/../../crates/bpm/db"
+use_default_target = true
+
+[providers]
+test = "http://localhost:8000/pkg"
+
+[mount]
+TARGET = "${BPM}/../../crates/bpm/install"
+TEST = "${BPM}/../../crates/bpm/install/test"

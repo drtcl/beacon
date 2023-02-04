@@ -1,10 +1,10 @@
 [workspace]
 
 members = [
-    "bpm",
-    "bpmd",
-    "bpmpack",
-    "hash_stream",
-    "hashdir",
-    "httpsearch",
+    "crates/bpm",
+    "crates/bpmd",
+    "crates/bpmpack",
+    "crates/hash_stream",
+    "crates/hashdir",
+    "crates/httpsearch",
 ]
