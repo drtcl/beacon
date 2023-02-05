@@ -1,11 +1,12 @@
 use crate::AResult;
 use crate::fetch::*;
-use crate::PackageID;
 use crate::provider::Provide;
 use crate::search::*;
 use itertools::Itertools;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use package::PackageID;
 
 #[derive(Debug)]
 pub struct FileSystem {

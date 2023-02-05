@@ -16,9 +16,18 @@ use blake2::{Blake2b, Digest};
 use clap::{Arg, ArgAction};
 use indicatif::ProgressBar;
 use semver::Version;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufWriter, BufReader, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+const ZSTD_LEVEL : i32 = 15;
+
+fn get_threads() -> u32 {
+    let t = std::thread::available_parallelism().map_or(1, |v| v.get() as u32);
+    let t = std::cmp::min(20, t);
+    //println!("using {t} threads");
+    t
+}
 
 // take a list of files
 // save them into a data tarball
@@ -29,14 +38,25 @@ use std::time::Duration;
 // cleanup intermediate files
 //
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum FileType {
     Dir,
     File,
     Link(PathBuf),
+    //Link(String),
 }
 
-#[derive(Debug)]
+impl From<FileType> for package::FileType {
+    fn from(ft: FileType) -> Self {
+        match ft {
+            FileType::Dir => package::FileType::Dir,
+            FileType::File => package::FileType::File,
+            FileType::Link(path) => package::FileType::Link(format!("{}", path.display())),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct FileEntry {
     full_path: PathBuf,
     pkg_path: PathBuf,
@@ -44,7 +64,7 @@ struct FileEntry {
     hash: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FileListing {
     files: Vec<FileEntry>,
 }
@@ -60,17 +80,18 @@ impl FileListing {
 
 fn file_discovery(paths: Vec<String>) -> FileListing {
 
-    let mut walker = ignore::WalkBuilder::new(paths.iter().next().unwrap());
+    let mut walker = ignore::WalkBuilder::new(paths.first().unwrap());
     for path in paths.iter().skip(1) {
         walker.add(path);
     }
 
     walker.standard_filters(false);
     walker.git_ignore(false);
+    walker.git_ignore(true);
 
     let mut files = Vec::new();
 
-    let root = PathBuf::from(paths.iter().next().unwrap());
+    let root = PathBuf::from(paths.first().unwrap());
     let root_parent = root.parent().unwrap();
 
     for entry in walker.build() {
@@ -224,7 +245,7 @@ fn main() -> Result<()> {
 
     let mut meta_file_path = PathBuf::new();
     meta_file_path.push(&output_dir);
-    meta_file_path.push("meta.toml");
+    meta_file_path.push(package::META_FILE_NAME);
 
     let mut package_file_path = PathBuf::new();
     package_file_path.push(&output_dir);
@@ -237,7 +258,7 @@ fn main() -> Result<()> {
 
     // -- begin work --
 
-    let mut file_listing = file_discovery(
+    let file_listing = file_discovery(
         matches
             .get_many::<String>("file")
             .unwrap()
@@ -249,19 +270,42 @@ fn main() -> Result<()> {
     // scan the file list and verify symlinks
     //verify_symlinks(&file_listing);
 
-    let data_tar_file = std::fs::File::create(tarball_file_path.as_path())?;
-    let data_tar_file = std::io::BufWriter::new(data_tar_file);
+    let data_tar_file = BufWriter::new(std::fs::File::create(tarball_file_path.as_path())?);
     let mut data_tar_hasher = HashingWriter::new(data_tar_file, Blake2b::new());
     let mut data_tar_file =
-        zstd::stream::write::Encoder::new(&mut data_tar_hasher, 29)?.auto_finish();
-    //zstd::stream::write::Encoder::new(&mut data_tar_hasher, 21)?.auto_finish();
+        zstd::stream::write::Encoder::new(&mut data_tar_hasher, ZSTD_LEVEL)?;
+
+    #[cfg(feature="mt")]
+    data_tar_file.multithread(get_threads())?;
+
+    let mut data_tar_file = data_tar_file.auto_finish();
     let mut data_tar = tar::Builder::new(&mut data_tar_file);
     data_tar.follow_symlinks(false);
+
+    let deps: Vec<(String, String)> = Vec::new();
+    //let deps = vec![("foo", "3.1.4"), ("honk", "4.0.1")];
+
+    let mut meta = package::MetaData::new(package::PackageID {
+        name: package_name.clone(),
+        version: format!("{}", package_version),
+    });
+   // for entry in file_listing.files {
+   //     meta.add_file(format!("{}", entry.pkg_path.display()), package::FileInfo {
+   //         hash: entry.hash,
+   //         filetype: entry.file_type.into(),
+   //     });
+   // }
+    for pair in &deps {
+        meta.add_dependency(package::PackageID {
+            name: pair.0.clone(),
+            version: pair.1.clone(),
+        });
+    }
 
     let pb = ProgressBar::new(file_listing.files.len() as u64);
     pb.set_style(
         indicatif::ProgressStyle::with_template(
-            "{spinner} [{wide_bar:.blue/white}] {pos}/{len} {elapsed} {eta}",
+            "{spinner} {wide_bar:.blue/white} {pos}/{len} {elapsed} {eta}",
         )
         //.progress_chars("█▇▆▅▄▃▂▁ █")
         .unwrap(),
@@ -272,7 +316,7 @@ fn main() -> Result<()> {
     let slow = false;
 
     // create the target install files tar file
-    for entry in &mut file_listing.files {
+    for mut entry in file_listing.files {
         match entry.file_type {
             FileType::Dir => {
                 data_tar.append_dir(&entry.pkg_path, &entry.full_path).context("inserting dir")?;
@@ -293,8 +337,8 @@ fn main() -> Result<()> {
                 //header.set_size(file_size);
                 //header.set_cksum();
 
-                let fd = std::io::BufReader::new(fd);
-                let mut reader = HashingReader::new(fd, Blake2b::new());
+                //let fd = BufReader::new(fd);
+                let mut reader = HashingReader::new(BufReader::new(fd), Blake2b::new());
 
                 data_tar.append_data(&mut header, &entry.pkg_path, &mut reader).context("inserting file")?;
                 let (_, hasher) = reader.into_parts();
@@ -319,96 +363,58 @@ fn main() -> Result<()> {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Symlink);
                 header.set_size(0);
-                data_tar.append_link(&mut header, &entry.pkg_path, &link_path).context("inserting symlink")?;
+                data_tar.append_link(&mut header, &entry.pkg_path, link_path).context("inserting symlink")?;
+
+                let mut hasher = Blake2b::new();
+                hasher.update(link_path.to_string_lossy().as_bytes());
+                let hash = hex_string(hasher.finalize().as_slice());
+                entry.hash = Some(hash);
 
                 if verbose {
-                    pb.suspend(|| println!("A l\t{}/", entry.pkg_path.display()));
+                    pb.suspend(|| println!("As\t{}/", entry.pkg_path.display()));
                     //println!("A l\t{}/", entry.pkg_path.display());
                 }
-
-                //todo!("handle symlinks");
             }
         }
 
+        meta.add_file(format!("{}", entry.pkg_path.display()), package::FileInfo {
+            hash: entry.hash,
+            filetype: entry.file_type.into(),
+        });
+
         pb.inc(1);
         if slow {
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(50));
         } //TODO dd
     }
-    pb.finish_and_clear();
 
     data_tar.finish()?;
     drop(data_tar);
     data_tar_file.flush()?;
     drop(data_tar_file);
 
+    pb.finish_and_clear();
+
     let (_, hasher) = data_tar_hasher.into_parts();
     let data_tar_hash = hex_string(hasher.finalize().as_slice());
+    meta.data_hash = Some(data_tar_hash);
+    meta.mount = Some(mount.clone());
 
-    //let data_tar_hash = hex_string(data_tar_hasher.hasher.finalize().as_slice());
-    //println!("data tar hash {}", &data_tar_hash);
-
-    let deps: Vec<(String, String)> = Vec::new();
-    //let deps = vec![("foo", "3.1.4"), ("honk", "4.0.1")];
-
-    // --- write toml data ---
     {
-        // now create a file that lists all included file paths and their hash
-        let metafile = std::fs::File::create(&meta_file_path)?;
-        let mut metafile = std::io::BufWriter::new(metafile);
-
-        let mut map = toml::map::Map::new();
-
-        let mut package_table = toml::map::Map::new();
-        package_table.insert(
-            "name".into(),
-            toml::value::Value::String(package_name.clone()),
-        );
-        package_table.insert(
-            "version".into(),
-            toml::value::Value::String(format!("{}", package_version)),
-        );
-        package_table.insert(
-            "data_cksum".into(),
-            toml::value::Value::String(data_tar_hash),
-        );
-        package_table.insert("mount".into(), toml::value::Value::String(mount.clone()));
-
-        map.insert("package".into(), toml::value::Value::Table(package_table));
-
-        if !deps.is_empty() {
-            let mut depends_table = toml::map::Map::new();
-            for pair in deps {
-                depends_table.insert(pair.0.into(), pair.1.into());
-            }
-            map.insert("depends".into(), toml::value::Value::Table(depends_table));
-        }
-
-        writeln!(&mut metafile, "{}", toml::ser::to_string(&map).unwrap())?;
-        writeln!(&mut metafile, "[files]")?;
-        for entry in &mut file_listing.files {
-            if let Some(ref hash) = entry.hash {
-                //println!("\"{}\" = \"{}\"\n", &entry.pkg_path.display(), hash);
-                write!(
-                    &mut metafile,
-                    "\"{}\" = \"{}\"\n",
-                    &entry.pkg_path.display(),
-                    hash
-                )?;
-            }
-        }
+        let mut metafile = std::io::BufWriter::new(std::fs::File::create(&meta_file_path)?);
+        meta.to_writer(&mut metafile)?;
     }
 
     // --- create a single tar package file ---
     let pkg_file = std::fs::File::create(&package_file_path)?;
-    let pkg_file = std::io::BufWriter::new(pkg_file);
+    let pkg_file = BufWriter::new(pkg_file);
     let mut hasher = HashingWriter {
         hasher: Blake2b::new(),
         inner: pkg_file,
     };
     let mut pkg_file = tar::Builder::new(&mut hasher);
 
-    pkg_file.append_path_with_name(&meta_file_path, "meta.toml")?;
+    pkg_file.append_path_with_name(&meta_file_path, package::META_FILE_NAME)?;
     pkg_file.append_path_with_name(&tarball_file_path, "data.tar.zst")?;
     pkg_file.finish()?;
     drop(pkg_file);
@@ -450,7 +456,7 @@ impl<Inner: Read, Hasher: Digest> std::io::Read for HashingReader<Inner, Hasher>
         if let Ok(n) = ret {
             self.hasher.update(&data[0..n]);
         }
-        return ret;
+        ret
     }
 }
 
@@ -474,7 +480,7 @@ impl<Inner: Write, Hasher: Digest> std::io::Write for HashingWriter<Inner, Hashe
         if let Ok(n) = ret {
             self.hasher.update(&data[0..n]);
         }
-        return ret;
+        ret
     }
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.inner.flush()
@@ -557,3 +563,67 @@ fn canonicalize_no_symlink(path: &Path) -> Result<PathBuf> {
 //    }
 //    Ok(())
 //}
+
+//    // --- write toml data ---
+//    {
+//        // now create a file that lists all included file paths and their hash
+//        let metafile = std::fs::File::create(&meta_file_path)?;
+//        let mut metafile = BufWriter::new(metafile);
+//
+//        let mut map = toml::map::Map::new();
+//
+//        let mut package_table = toml::map::Map::new();
+//        package_table.insert(
+//            "name".into(),
+//            toml::value::Value::String(package_name.clone()),
+//        );
+//        package_table.insert(
+//            "version".into(),
+//            toml::value::Value::String(format!("{}", package_version)),
+//        );
+//        package_table.insert(
+//            "data_cksum".into(),
+//            toml::value::Value::String(data_tar_hash),
+//        );
+//        package_table.insert(
+//            "mount".into(),
+//            toml::value::Value::String(mount.clone())
+//        );
+//
+//        map.insert("package".into(), toml::value::Value::Table(package_table));
+//
+////        if !deps.is_empty() {
+////            let mut depends_table = toml::map::Map::new();
+////            for pair in deps {
+////                depends_table.insert(pair.0.into(), pair.1.into());
+////            }
+////            map.insert("depends".into(), toml::value::Value::Table(depends_table));
+////        } else {
+////            if verbose {
+////            }
+////        }
+//
+//        writeln!(&mut metafile, "{}", toml::ser::to_string(&map).unwrap())?;
+//        writeln!(&mut metafile, "[files]")?;
+//        for entry in &mut file_listing.files {
+//            if let Some(ref hash) = entry.hash {
+//                //println!("\"{}\" = \"{}\"\n", &entry.pkg_path.display(), hash);
+//                write!(
+//                    &mut metafile,
+//                    "\"{}\" = \"{}:{}\"\n",
+//                    &entry.pkg_path.display(),
+//                    match entry.file_type {
+//                        FileType::Dir => 'd',
+//                        FileType::File => 'f',
+//                        FileType::Link(_) => 's',
+//                    },
+//                    hash
+//                )?;
+//            } else {
+//                //println!("file {} has no hash", entry.pkg_path.display());
+//                if !matches!(entry.file_type, FileType::Dir) {
+//                    unreachable!("{}", format!("non-dir file '{}' with no hash", entry.pkg_path.display()));
+//                }
+//            }
+//        }
+//    }

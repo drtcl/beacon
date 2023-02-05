@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 
 members = [
     "crates/bpm",
@@ -7,4 +8,7 @@ members = [
     "crates/hash_stream",
     "crates/hashdir",
     "crates/httpsearch",
+    "crates/package",
+    "crates/walk_example",
+    "crates/zstd_patch",
 ]

@@ -6,16 +6,18 @@
 mod config;
 mod db;
 mod fetch;
-mod package;
 mod provider;
 mod search;
 mod source;
 mod app;
 
+#[path = "package.rs"]
+mod pkg;
+
 use anyhow::Context;
 use anyhow::Result as AResult;
 use clap::Arg;
-use package::PackageID;
+//use package::PackageID;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::io::Seek;

@@ -33,7 +33,8 @@ impl App {
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
         //write!(&mut tw, "{}\t{}\n", "name", "version")?;
         for ent in self.db.installed.iter() {
-            writeln!(&mut tw, "{}\t{}", ent.id.name, ent.id.version)?;
+            //writeln!(&mut tw, "{}\t{}", ent.id.name, ent.id.version)?;
+            writeln!(&mut tw, "{}\t{}", ent.metadata.id.name, ent.metadata.id.version)?;
         }
         tw.flush()?;
         Ok(())
@@ -101,22 +102,40 @@ impl App {
         // or search all providers and install max version?
         // mirrors?
 
-        let pkg_id = package::PackageID {
-            name: String::from(pkg_name),
-            version: version.clone(),
+        todo!();
+
+//        let pkg_id = package::PackageID {
+//            name: String::from(pkg_name),
+//            version: version.clone(),
+//        };
+//
+//        let filepath = package::to_filepath(PathBuf::from(&self.config.cache_dir), pkg_name, version);
+//
+//        let mut file = std::fs::File::create(&filepath)?;
+//
+//        for provider in &self.config.providers {
+//            if provider.1.as_provide().fetch(&pkg_id, &mut file).is_ok() {
+//                break;
+//            }
+//        }
+//
+//        Ok(filepath)
+    }
+
+    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<PathBuf> {
+        //let mount_point = pkg::get_mountpoint(&mut pkg_file)?;
+        let mount_point = &metadata.mount;
+        let mount_point = match mount_point {
+            Some(loc) => String::from(loc),
+            None => {
+                if !self.config.use_default_target {
+                    anyhow::bail!("attempt to use default target, which is disabled");
+                }
+                "TARGET".to_string()
+            },
         };
-
-        let filepath = package::to_filepath(PathBuf::from(&self.config.cache_dir), pkg_name, version);
-
-        let mut file = std::fs::File::create(&filepath)?;
-
-        for provider in &self.config.providers {
-            if provider.1.as_provide().fetch(&pkg_id, &mut file).is_ok() {
-                break;
-            }
-        }
-
-        Ok(filepath)
+        let mount_point = self.config.get_mountpoint(&mount_point).context(format!("invalid mount point {mount_point}"))?;
+        Ok(mount_point)
     }
 
     pub fn install_pkg_file(&mut self, file_path: PathBuf) -> AResult<()> {
@@ -131,7 +150,7 @@ impl App {
         let pkg_name;
         let pkg_version;
 
-        match package::name_parts(file_name) {
+        match pkg::name_parts(file_name) {
             Some((n, v)) => {
                 pkg_name = n;
                 pkg_version = v;
@@ -143,26 +162,24 @@ impl App {
 
         // open the file
         let mut file = std::fs::File::open(&file_path).context("failed to open cached package file")?;
+        let metadata = package::get_metadata(&mut file)?;
 
-        let mount_point = package::get_mountpoint(&mut file)?;
-        let mount_point = match mount_point {
-            Some(loc) => loc,
-            None => {
-                if !self.config.use_default_target {
-                    anyhow::bail!("using default target which is disabled");
-                }
-                "TARGET".to_string()
-            },
-        };
-        let mount_point = self.config.get_mountpoint(&mount_point).context("invalid mount point")?;
+        if metadata.id.name != pkg_name {
+            todo!();
+        }
+        if metadata.id.version != pkg_version.to_string() {
+            todo!();
+        }
 
-        let install_dir = mount_point;
+        let install_dir = self.get_mountpoint_dir(&metadata)?;
 
         // get the list of files and their hashes from the meta file
-        let files = package::get_filelist(&mut file)?;
+        //let files = package::get_filelist(&mut file)?;
+        //let files = &metadata.files;
 
         // make sure the checksum matches
-        let cksum_match = package::check_datachecksum(&mut file)?;
+
+        let cksum_match = pkg::check_datachecksum(&metadata, &mut file)?;
         if !cksum_match {
             anyhow::bail!("Corrupted package, checksum mismatch");
         }
@@ -170,6 +187,7 @@ impl App {
         // obtain reader for embeded data archive
         file.rewind()?;
         let mut tar = tar::Archive::new(&mut file);
+        //let mut data_tar = pkg::seek_to_tar_entry("data.tar.zst", &mut tar)?;
         let mut data_tar = package::seek_to_tar_entry("data.tar.zst", &mut tar)?;
         let mut zstd = zstd::stream::read::Decoder::new(&mut data_tar)?;
         let mut data_tar = tar::Archive::new(&mut zstd);
@@ -178,6 +196,8 @@ impl App {
         //data_tar.unpack(install_dir)?;
 
         //let mut file_list = Vec::new();
+
+        //TODO check that the tar only unpacks files listed in metadata.files
 
         // unpack individual files
         for entry in data_tar.entries()? {
@@ -200,27 +220,28 @@ impl App {
             }
         }
 
-        let mut details = db::DbPkg::new(PackageID {
-            name: String::from(pkg_name),
-            version: pkg_version,
-        });
+        //let mut details = db::DbPkg::new(PackageID {
+        //    name: String::from(pkg_name),
+        //    version: pkg_version.to_string(),
+        //});
 
-        for (k, v) in files.into_iter() {
-            details.files.push((k, v));
-        }
+        //for (k, v) in files.into_iter() {
+        //    details.files.push((k, v));
+        //}
 
+        let mut details = db::DbPkg::new(metadata);
         details.location = install_dir.into();
+
         self.db.add_package(details);
 
-        let mut db_file = std::fs::File::create("db")?;
-        self.db
-            .write_to(&mut std::io::BufWriter::new(&mut db_file))?;
+        let mut db_file = std::fs::File::create(&self.config.db_file)?;
+        //self.db.write_to(&mut std::io::BufWriter::new(&mut db_file))?;
+        self.db.write_to(&mut db_file)?;
         db_file.sync_all()?;
-
         drop(db_file);
 
-        let db = db::Db::from_file("db")?;
-        //dbg!(&db);
+        let db = db::Db::from_file(&self.config.db_file)?;
+        dbg!(&db);
 
         Ok(())
     }
@@ -250,7 +271,7 @@ impl App {
                 .to_str()
                 .expect("invalid filepath");
 
-            if !package::named_properly(pkg_filename) {
+            if !pkg::named_properly(pkg_filename) {
                 anyhow::bail!("package name is invalid");
             }
 
@@ -300,8 +321,7 @@ impl App {
 
     /// verify package state
     pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>) -> AResult<()>
-    where
-        S: AsRef<str>,
+        where S: AsRef<str>,
     {
         // for installed packages listed in the db,
         // walk each file and hash the version we have on disk
@@ -310,11 +330,7 @@ impl App {
 
         // all given names must be installed
         for name in pkgs {
-            let find = self
-                .db
-                .installed
-                .iter()
-                .find(|&ent| ent.id.name == name.as_ref());
+            let find = self.db.installed.iter().find(|&ent| ent.metadata.id.name == name.as_ref());
             if find.is_none() {
                 anyhow::bail!("package named '{}' is not installed", name.as_ref());
             }
@@ -323,21 +339,27 @@ impl App {
         let filtering = !pkgs.is_empty();
         let iter = self.db.installed.iter().filter(|&ent| {
             if filtering {
-                pkgs.iter().any(|name| name.as_ref() == ent.id.name)
+                pkgs.iter().any(|name| name.as_ref() == ent.metadata.id.name)
             } else {
                 true
             }
         });
 
         for pkg in iter {
-            println!("verifying package {}", pkg.id.name);
+            println!("verifying package {}", pkg.metadata.id.name);
 
-            let root_dir = pkg.location.clone();
-            for file in pkg.files.iter() {
-                let (stem, db_hash) = file;
+            let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
+            for (filepath, fileinfo) in pkg.metadata.files.iter() {
+
+                if !fileinfo.filetype.is_file() {
+                    println!("skipping non-file {}", filepath);
+                    continue;
+                }
+
                 let mut path = root_dir.clone();
-                path.push(stem);
-                //println!("checking file at {path:?} for hash {db_hash}");
+                let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
+                path.push(filepath);
+                println!("checking file at {path:?} for hash {db_hash}");
 
                 if !path.exists() {
                     println!("bad -- {:?} does not exist", &path);
@@ -346,7 +368,7 @@ impl App {
 
                 let file = std::fs::File::open(&path)?;
                 let reader = std::io::BufReader::new(file);
-                let hash = package::blake2_hash_reader(reader)?;
+                let hash = pkg::blake2_hash_reader(reader)?;
 
                 //println!("got hash {hash}");
                 if &hash == db_hash {
@@ -369,7 +391,7 @@ impl App {
 
         self.load_db()?;
 
-        let found = self.db.installed.iter().find(|e| &e.id.name == pkg_name);
+        let found = self.db.installed.iter().find(|e| &e.metadata.id.name == pkg_name);
 
         let pkg = match found {
             None => anyhow::bail!("package '{pkg_name}' not installed"),
@@ -378,9 +400,8 @@ impl App {
 
         //dbg!(pkg);
 
-        for file in &pkg.files {
-            let (path, _hash) = file;
-            println!("removing {path}");
+        for (filepath, fileinfo) in &pkg.metadata.files {
+            println!("removing {filepath}");
             // TODO actually delete the files
         }
 

@@ -27,130 +27,132 @@ where
     Ok(semver::Version::new(1, 2, 3))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PackageID {
-    pub name: String,
+//#[derive(Clone, Debug, Serialize, Deserialize)]
+//pub struct PackageID {
+//    pub name: String,
+//
+//    #[serde(serialize_with = "semver_ser")]
+//    #[serde(deserialize_with = "semver_de")]
+//    pub version: semver::Version,
+//}
 
-    #[serde(serialize_with = "semver_ser")]
-    #[serde(deserialize_with = "semver_de")]
-    pub version: semver::Version,
-}
-
-pub fn seek_to_tar_entry<'a, R: Read + Seek>(
-    needle: &str,
-    tar: &'a mut tar::Archive<R>,
-) -> AResult<tar::Entry<'a, R>> {
-    for entry in tar.entries_with_seek()? {
-        if let Ok(path) = entry.as_ref().unwrap().path() && path == Path::new(needle) {
-            return Ok(entry?);
-        }
-    }
-    return Err(anyhow::anyhow!("path not found in tar archive"));
-}
+//pub fn seek_to_tar_entry<'a, R: Read + Seek>(
+//    needle: &str,
+//    tar: &'a mut tar::Archive<R>,
+//) -> AResult<tar::Entry<'a, R>> {
+//    for entry in tar.entries_with_seek()? {
+//        if let Ok(path) = entry.as_ref().unwrap().path() && path == Path::new(needle) {
+//            return Ok(entry?);
+//        }
+//    }
+//    return Err(anyhow::anyhow!("path not found in tar archive"));
+//}
 
 type FilePath = String;
 type FileHash = String;
 type FileHashes = HashMap<FilePath, FileHash>;
 
-pub fn get_mountpoint(pkg_file: &mut File) -> AResult<Option<String>> {
+//pub fn get_mountpoint(pkg_file: &mut File) -> AResult<Option<String>> {
+//
+//    pkg_file.rewind()?;
+//    let mut tar = tar::Archive::new(pkg_file);
+//    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
+//
+//    let mut contents = String::new();
+//    meta.read_to_string(&mut contents)?;
+//
+//    let toml = toml::from_str::<toml::Value>(contents.as_str()).unwrap();
+//    let toml = toml.get("package").context("malformed metadata")?;
+//    //dbg!(&toml);
+//
+//    match toml.get("mount") {
+//        Some(v) => {
+//            let mountpoint = v.as_str().context("mount value is not a string")?;
+//            return Ok(Some(mountpoint.to_string()));
+//        },
+//        None => {
+//            return Ok(None);
+//        }
+//    }
+//}
+
+//pub fn get_filelist(pkg_file: &mut File) -> AResult<FileHashes> {
+//    pkg_file.rewind()?;
+//    let mut tar = tar::Archive::new(pkg_file);
+//    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
+//
+//    let mut contents = String::new();
+//    meta.read_to_string(&mut contents)?;
+//
+//    let toml = toml::from_str::<toml::Value>(contents.as_str()).unwrap();
+//    let files = toml.get("files").context("no file listing in package")?;
+//
+//    if let toml::Value::Table(files) = files {
+//        let mut ok = true;
+//        let files = files
+//            .iter()
+//            .map(|(k, v)| {
+//                if v.is_str() {
+//                    (k.to_string(), String::from(v.as_str().unwrap()))
+//                } else {
+//                    ok = false;
+//                    (k.to_string(), String::new())
+//                }
+//            })
+//            .collect();
+//        if !ok {
+//            return Err(anyhow::anyhow!(
+//                "package metadata contains an invalid file hash"
+//            ));
+//        }
+//        return Ok(files);
+//    } else {
+//        return Err(anyhow::anyhow!("no files listing in package"));
+//    }
+//}
+
+//pub fn get_datachecksum(pkg_file: &mut File) -> AResult<String> {
+//    pkg_file.rewind()?;
+//    let mut tar = tar::Archive::new(pkg_file);
+//    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
+//
+//    let mut contents = String::new();
+//    meta.read_to_string(&mut contents)?;
+//
+//    let toml = toml::from_str::<toml::Value>(contents.as_str())?;
+//
+//    let sum = toml
+//        .try_into::<toml::value::Table>()
+//        .context("package metadata is malformed")?
+//        .remove("package")
+//        .context("package metadata is malformed")?
+//        .try_into::<toml::value::Table>()
+//        .context("package metadata is malformed")?
+//        .remove("data_cksum")
+//        .context("package metadata is missing data checksum")?
+//        .try_into::<String>()
+//        .context("package is missing data checksum")?;
+//
+//    Ok(sum)
+//}
+
+pub fn check_datachecksum(metadata: &package::MetaData, pkg_file: &mut File) -> AResult<bool> {
+
+    //let described_sum = get_datachecksum(pkg_file)?;
+    let described_sum = metadata.data_hash.as_ref().expect("no data hash");
 
     pkg_file.rewind()?;
     let mut tar = tar::Archive::new(pkg_file);
-    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
-
-    let mut contents = String::new();
-    meta.read_to_string(&mut contents)?;
-
-    let toml = toml::from_str::<toml::Value>(contents.as_str()).unwrap();
-    let toml = toml.get("package").context("malformed metadata")?;
-    //dbg!(&toml);
-
-    match toml.get("mount") {
-        Some(v) => {
-            let mountpoint = v.as_str().context("mount value is not a string")?;
-            return Ok(Some(mountpoint.to_string()));
-        },
-        None => {
-            return Ok(None);
-        }
-    }
-}
-
-pub fn get_filelist(pkg_file: &mut File) -> AResult<FileHashes> {
-    pkg_file.rewind()?;
-    let mut tar = tar::Archive::new(pkg_file);
-    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
-
-    let mut contents = String::new();
-    meta.read_to_string(&mut contents)?;
-
-    let toml = toml::from_str::<toml::Value>(contents.as_str()).unwrap();
-    let files = toml.get("files").context("no file listing in package")?;
-
-    if let toml::Value::Table(files) = files {
-        let mut ok = true;
-        let files = files
-            .iter()
-            .map(|(k, v)| {
-                if v.is_str() {
-                    (k.to_string(), String::from(v.as_str().unwrap()))
-                } else {
-                    ok = false;
-                    (k.to_string(), String::new())
-                }
-            })
-            .collect();
-        if !ok {
-            return Err(anyhow::anyhow!(
-                "package metadata contains an invalid file hash"
-            ));
-        }
-        return Ok(files);
-    } else {
-        return Err(anyhow::anyhow!("no files listing in package"));
-    }
-}
-
-pub fn get_datachecksum(pkg_file: &mut File) -> AResult<String> {
-    pkg_file.rewind()?;
-    let mut tar = tar::Archive::new(pkg_file);
-    let mut meta = seek_to_tar_entry("meta.toml", &mut tar)?;
-
-    let mut contents = String::new();
-    meta.read_to_string(&mut contents)?;
-
-    let toml = toml::from_str::<toml::Value>(contents.as_str())?;
-
-    let sum = toml
-        .try_into::<toml::value::Table>()
-        .context("package metadata is malformed")?
-        .remove("package")
-        .context("package metadata is malformed")?
-        .try_into::<toml::value::Table>()
-        .context("package metadata is malformed")?
-        .remove("data_cksum")
-        .context("package metadata is missing data checksum")?
-        .try_into::<String>()
-        .context("package is missing data checksum")?;
-
-    Ok(sum)
-}
-
-pub fn check_datachecksum(pkg_file: &mut File) -> AResult<bool> {
-    let described_sum = get_datachecksum(pkg_file)?;
-
-    pkg_file.rewind()?;
-    let mut tar = tar::Archive::new(pkg_file);
-    let mut data = seek_to_tar_entry("data.tar.zst", &mut tar)?;
+    let mut data = package::seek_to_tar_entry("data.tar.zst", &mut tar)?;
 
     let computed_sum = blake2_hash_reader(&mut data)?;
     println!(
         "computed data hash {} matches:{}",
         computed_sum,
-        computed_sum == described_sum
+        &computed_sum == described_sum
     );
 
-    Ok(computed_sum == described_sum)
+    Ok(&computed_sum == described_sum)
 }
 
 pub fn blake2_hash_reader<R: Read>(mut read: R) -> std::io::Result<String> {

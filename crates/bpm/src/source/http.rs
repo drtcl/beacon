@@ -1,12 +1,13 @@
 use crate::AResult;
 use crate::fetch::*;
-use crate::package;
-use crate::PackageID;
 use crate::provider::Provide;
 use crate::search::*;
 use httpsearch;
 use serde_derive::Serialize;
 use std::io::Write;
+
+use package::PackageID;
+use crate::pkg;
 
 #[derive(Debug, Serialize)]
 pub struct Http {
@@ -54,10 +55,11 @@ impl Search for Http {
 
 impl Fetch for Http {
     fn fetch(&self, pkg: &PackageID, write: &mut dyn Write) -> AResult<u64> {
-        let filename = package::to_filename(&pkg.name, &pkg.version);
+        let ver = semver::Version::parse(&pkg.version)?;
+        let filename = pkg::to_filename(&pkg.name, &ver);
         let url = format!(
             "{}/{}/{}.{}.{}/{}",
-            &self.url, &pkg.name, pkg.version.major, pkg.version.minor, pkg.version.patch, filename
+            &self.url, &pkg.name, ver.major, ver.minor, ver.patch, filename
         );
         dbg!(&url);
 

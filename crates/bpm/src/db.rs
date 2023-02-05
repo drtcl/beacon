@@ -1,26 +1,47 @@
 use crate::*;
 
+//const DB_VERSION : u32 = 1;
+
 type HashString = String;
 type FilePath = String;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum FileType {
+    File,
+    Link,
+    Dir,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FileInfo {
+    filetype: FileType,
+    path: FilePath,
+    hash: HashString,
+    attrs: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DbPkg {
-    pub id: PackageID,
-    pub location: PathBuf,
-    pub files: Vec<(FilePath, HashString)>,
+    pub metadata: package::MetaData,
+    //pub id: PackageID,
+    pub location: Option<PathBuf>,
+    //pub files: Vec<(FilePath, HashString)>,
+    //pub files: Vec<FileInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Db {
+    //version: u32,
     pub installed: Vec<DbPkg>,
 }
 
 impl DbPkg {
-    pub fn new(id: PackageID) -> Self {
+    pub fn new(metadata: package::MetaData) -> Self {
         Self {
-            id,
-            location: PathBuf::new(),
-            files: Vec::new(),
+            //id,
+            metadata,
+            location: None,
+            //files: Vec::new(),
         }
     }
 }
@@ -32,18 +53,27 @@ impl Db {
         }
     }
 
+//    pub fn add_package(&mut self, pkg: DbPkg) {
+//        self.installed.retain(|p| {
+//            p.id.name != pkg.id.name
+//        });
+//        self.installed.push(pkg);
+//    }
+
     pub fn add_package(&mut self, pkg: DbPkg) {
         self.installed.retain(|p| {
-            p.id.name != pkg.id.name
+            p.metadata.id.name != pkg.metadata.id.name
         });
         self.installed.push(pkg);
     }
+
 
     pub fn write_to<W>(&self, w: &mut W) -> AResult<()>
     where
         W: std::io::Write,
     {
-        ron::ser::to_writer_pretty(w, self, ron::ser::PrettyConfig::new())?;
+        serde_yaml::to_writer(w, self)?;
+        //ron::ser::to_writer_pretty(w, self, ron::ser::PrettyConfig::new())?;
         //ron::ser::to_writer(w, self)?;
         Ok(())
     }
@@ -57,7 +87,8 @@ impl Db {
         let db = if contents.is_empty() {
             Db::new()
         } else {
-            ron::from_str(&contents)?
+            //ron::from_str(&contents)?
+            serde_yaml::from_str(&contents)?
         };
         Ok(db)
     }

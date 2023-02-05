@@ -1,6 +1,6 @@
 use crate::AResult;
 
-use crate::package::PackageID;
+use package::PackageID;
 use std::io::Write;
 
 pub trait Fetch {
