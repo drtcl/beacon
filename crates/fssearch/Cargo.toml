@@ -1,0 +1,18 @@
+[package]
+name = "fssearch"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fssearch"
+
+[[bin]]
+name = "fssearch"
+
+[dependencies]
+anyhow = "1.0.70"
+package = { path = "../package" }
+serde_json = "1.0.104"
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+walkdir = "2.3.3"

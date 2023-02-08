@@ -3,10 +3,11 @@ name = "zstd_patch"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
 
 [dependencies]
 anyhow = "1.0.71"
 clap = "4.3.0"
 indicatif = "0.17.3"
 zstd = { version = "0.12.3", features = ["experimental", "zstdmt"] }
+

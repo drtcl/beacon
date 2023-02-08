@@ -8,7 +8,21 @@ members = [
     "crates/hash_stream",
     "crates/hashdir",
     "crates/httpsearch",
+    "crates/fssearch",
     "crates/package",
     "crates/walk_example",
     "crates/zstd_patch",
 ]
+
+[profile.release]
+debug = false
+strip = true
+
+[profile.tiny]
+inherits = "release"
+debug = false
+strip = true
+opt-level = 'z'
+codegen-units = 1
+lto = true
+panic = "abort"

@@ -1,155 +1,183 @@
 use crate::*;
+use std::io::BufWriter;
+use std::io::IsTerminal;
+use package::PackageID;
+use std::fs::File;
 
+mod list;
+
+#[derive(Debug)]
 pub struct App {
     pub config: config::Config,
     pub db: db::Db,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Versioning {
+    pub pinned_to_version: bool,
+    pub pinned_to_channel: bool,
+    pub channel: Option<String>,
+}
+
 impl App {
     pub fn load_db(&mut self) -> AResult<()> {
-        println!("loading db");
-        let mut db_file =
-            std::fs::File::open(&self.config.db_file).context("cannot read database file")?;
+        tracing::trace!("loading database");
+
+        if !self.config.db_file.exists() {
+            tracing::warn!("database file does not exist");
+        }
+
+        let mut db_file = File::open(&self.config.db_file).context("cannot read database file")?;
         self.db = db::Db::from_reader(&mut db_file).context("failed to load database")?;
         Ok(())
     }
 
     pub fn create_load_db(&mut self) -> AResult<()> {
+
+        tracing::trace!("loading database");
+
         let db_path = Path::new(&self.config.db_file);
         let exists = db_path
             .try_exists()
             .context("cannot access database file")?;
         if !exists {
-            println!("creating empty db file");
-            std::fs::File::create(db_path).context("cannot create database file")?;
+            tracing::trace!("creating empty db file");
+            File::create(db_path).context("cannot create database file")?;
         }
 
         self.load_db()
     }
 
-    pub fn list_cmd(&mut self) -> AResult<()> {
-        self.load_db()?;
-
-        let mut tw = tabwriter::TabWriter::new(std::io::stdout());
-        //write!(&mut tw, "{}\t{}\n", "name", "version")?;
-        for ent in self.db.installed.iter() {
-            //writeln!(&mut tw, "{}\t{}", ent.id.name, ent.id.version)?;
-            writeln!(&mut tw, "{}\t{}", ent.metadata.id.name, ent.metadata.id.version)?;
-        }
-        tw.flush()?;
+    pub fn save_db(&self) -> AResult<()> {
+        tracing::trace!("saving database");
+        let mut path = self.config.db_file.clone();
+        let ext = path.extension().map_or("tmp".into(), |e| format!("{}.tmp", e.to_string_lossy()));
+        path.set_extension(ext);
+        let mut file = BufWriter::new(File::create(&path)?);
+        self.db.write_to(&mut file)?;
+        std::fs::rename(&path, &self.config.db_file)?;
         Ok(())
     }
 
-    pub fn search_cmd(&self, pkg_name: &str) -> AResult<()> {
-        let mut results = search::SearchResults::new();
-        for provider in &self.config.providers {
-            let part = provider.1.as_provide().search(pkg_name);
-            results.extend(part);
-        }
+    /// search each provider's cached package info, merge results, print latest versions
+    pub fn search_cmd(&self, pkg_name: &str, exact: bool) -> AResult<()> {
+
+        let results = self.search_results(pkg_name, exact)?;
 
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
-        if !results.inner.is_empty() {
-            writeln!(&mut tw, "\tname\tversion\tdescription")?;
-            //write!(&mut tw, "\t---\t---\t---\n")?;
+        if std::io::stdout().is_terminal() && !results.is_empty() {
+            writeln!(&mut tw, "name\tversion\tdescription")?;
+            writeln!(&mut tw, "----\t-------\t-----------")?;
         }
-        for (n, result) in results.inner.into_iter().enumerate() {
-            let version = result.1.versions.last().unwrap();
-            writeln!(&mut tw, "{})\t{}\t{}", n, result.1.name, version)?;
+        for (name, versions) in results.iter() {
+            let (version, _url) = versions.last_key_value().unwrap();
+            writeln!(&mut tw, "{}\t{}", name, version)?;
         }
         tw.flush()?;
 
         Ok(())
     }
 
-    pub fn search_results(&self, pkg_name: &str, fuzzy: bool) -> AResult<search::SearchResults> {
-        let mut results = search::SearchResults::new();
+    /// search and merge each provider's cached package info
+    fn search_results(&self, pkg_name: &str, exact: bool) -> AResult<search::PackageList> {
+
+        let mut merged_results = search::PackageList::new();
+
         for provider in &self.config.providers {
-            let part = provider.1.as_provide().search(pkg_name);
-            results.extend(part);
+
+            // load the provider's cache file and merge it's results
+            if let Ok(mut cached_results) = provider.load_cache() {
+
+                cached_results.retain(|name, _versions| {
+                    if exact {
+                        name == pkg_name
+                    } else {
+                        name.contains(pkg_name)
+                    }
+                });
+                merged_results = search::merge_package_lists(merged_results, cached_results);
+            } else {
+                tracing::trace!(file=?provider.cache_file, "couldn't read cache file for provider '{}'", provider.name);
+            }
         }
 
-        if !fuzzy {
-            results
-                .inner
-                .retain(|_k, v| v.name == pkg_name && !v.versions.is_empty())
-        }
-
-        Ok(results)
+        Ok(merged_results)
     }
 
-    pub fn find_latest_version(&self, pkg_name: &str) -> AResult<Version> {
-        let results = self.search_results(pkg_name, false)?;
+    fn get_cached_package_path(&self, id: &PackageID) -> Option<PathBuf> {
 
-        if results.inner.len() != 1 {
-            anyhow::bail!("could not find package '{pkg_name}'");
+        for entry in walkdir::WalkDir::new(&self.config.cache_dir) {
+            if let Ok(entry) = entry {
+                let filename = entry.file_name().to_string_lossy();
+                if package::filename_match(&filename, id) {
+                    tracing::trace!("found cached package file {}", filename);
+                    return Some(entry.into_path());
+                }
+            }
         }
-
-        let versions: Vec<_> = results
-            .inner
-            .iter()
-            .next()
-            .unwrap()
-            .1
-            .versions
-            .iter()
-            .filter(|v| v.pre.is_empty())
-            .collect();
-        Ok((*versions.iter().last().unwrap()).clone())
+        tracing::trace!("package file not found in cache");
+        None
     }
 
-    pub fn cache_fetch_cmd(&self, pkg_name: &str, version: &Version) -> AResult<PathBuf> {
-        // hmm, install first found from first provider?
-        // or search all providers and install max version?
-        // mirrors?
+    /// fetch a package by name AND version
+    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<PathBuf> {
 
-        todo!();
+        tracing::debug!(pkg=id.name, version=id.version, "cache fetch");
 
-//        let pkg_id = package::PackageID {
-//            name: String::from(pkg_name),
-//            version: version.clone(),
-//        };
-//
-//        let filepath = package::to_filepath(PathBuf::from(&self.config.cache_dir), pkg_name, version);
-//
-//        let mut file = std::fs::File::create(&filepath)?;
-//
-//        for provider in &self.config.providers {
-//            if provider.1.as_provide().fetch(&pkg_id, &mut file).is_ok() {
-//                break;
-//            }
-//        }
-//
-//        Ok(filepath)
+        // ensure that we have the cache/packages dir
+        std::fs::create_dir_all(join_path!(&self.config.cache_dir, "packages")).context("failed to create cache/packages dir")?;
+
+        let temp_path = join_path!(&self.config.cache_dir, "temp.download");
+        let mut file = File::create(&temp_path)?;
+
+        for provider in &self.config.providers {
+            if let Ok(packages) = provider.load_cache() {
+                if let Some(versions) = packages.get(&id.name) {
+                    if let Some(x) = versions.get(&id.version) {
+                        dbg!(x);
+
+                        let final_path = join_path!(&self.config.cache_dir, "packages", &x.filename);
+
+                        let result = provider.as_provide().fetch(&mut file, &id, &x.url);
+                        if result.is_ok() {
+                            file.sync_all()?;
+                            drop(file);
+                            tracing::trace!("moving fetched package file from {} to {}", temp_path.display(), final_path.display());
+                            std::fs::rename(&temp_path, &final_path).context("failed to move file")?;
+                            return Ok(final_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("failed to fetch package"))
     }
 
     fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<PathBuf> {
-        //let mount_point = pkg::get_mountpoint(&mut pkg_file)?;
-        let mount_point = &metadata.mount;
-        let mount_point = match mount_point {
-            Some(loc) => String::from(loc),
-            None => {
-                if !self.config.use_default_target {
-                    anyhow::bail!("attempt to use default target, which is disabled");
-                }
-                "TARGET".to_string()
-            },
-        };
-        let mount_point = self.config.get_mountpoint(&mount_point).context(format!("invalid mount point {mount_point}"))?;
-        Ok(mount_point)
+        let pkg_mount_point = metadata.mount.as_deref();
+        let mount_point = self.config.get_mountpoint(pkg_mount_point);
+        match mount_point {
+            config::MountPoint::Specified(mp) |
+            config::MountPoint::Default(mp) => Ok(mp),
+            config::MountPoint::DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
+            config::MountPoint::Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
+        }
     }
 
-    pub fn install_pkg_file(&mut self, file_path: PathBuf) -> AResult<()> {
+    /// install a package from a local package file.
+    fn install_pkg_file(&mut self, file_path: PathBuf, versioning: Versioning) -> AResult<()> {
 
-        println!("install_pkg_file {}", file_path.display());
+        tracing::debug!("install_pkg_file {}", file_path.display());
 
         let file_name = file_path
-            .file_name()
-            .expect("invalid filename")
-            .to_str()
-            .expect("invalid filename");
+            .file_name().context("invalid filename")?
+            .to_str().context("invalid filename")?;
+
+        //dbg!(file_name);
+
         let pkg_name;
         let pkg_version;
-
         match pkg::name_parts(file_name) {
             Some((n, v)) => {
                 pkg_name = n;
@@ -161,28 +189,34 @@ impl App {
         }
 
         // open the file
-        let mut file = std::fs::File::open(&file_path).context("failed to open cached package file")?;
+        let mut file = File::open(&file_path).context("failed to open cached package file")?;
         let metadata = package::get_metadata(&mut file)?;
 
-        if metadata.id.name != pkg_name {
-            todo!();
+        // package filename must match package metadata
+        // name must match
+        if metadata.name != pkg_name {
+            anyhow::bail!("failed to installed {}, package file is corrupt. Package name does not match package metadata.", pkg_name);
         }
-        if metadata.id.version != pkg_version.to_string() {
-            todo!();
+        // version must match
+        if metadata.version != pkg_version.to_string() {
+            anyhow::bail!("failed to installed {}, package file is corrupt. Package version does not match package metadata.", pkg_name);
+        }
+
+        // make sure the checksum matches
+        if !pkg::check_datachecksum(&metadata, &mut file)? {
+            anyhow::bail!("failed to installed {}, package file is corrupt. Package checksum mismatch", pkg_name);
         }
 
         let install_dir = self.get_mountpoint_dir(&metadata)?;
 
+        // create the mount point dir if it doesn't exist
+        if !install_dir.exists() {
+            std::fs::create_dir_all(&install_dir)?;
+        }
+
         // get the list of files and their hashes from the meta file
         //let files = package::get_filelist(&mut file)?;
         //let files = &metadata.files;
-
-        // make sure the checksum matches
-
-        let cksum_match = pkg::check_datachecksum(&metadata, &mut file)?;
-        if !cksum_match {
-            anyhow::bail!("Corrupted package, checksum mismatch");
-        }
 
         // obtain reader for embeded data archive
         file.rewind()?;
@@ -231,22 +265,76 @@ impl App {
 
         let mut details = db::DbPkg::new(metadata);
         details.location = install_dir.into();
+        details.versioning = versioning;
 
         self.db.add_package(details);
-
-        let mut db_file = std::fs::File::create(&self.config.db_file)?;
-        //self.db.write_to(&mut std::io::BufWriter::new(&mut db_file))?;
-        self.db.write_to(&mut db_file)?;
-        db_file.sync_all()?;
-        drop(db_file);
-
-        let db = db::Db::from_file(&self.config.db_file)?;
-        dbg!(&db);
+        self.save_db()?;
 
         Ok(())
     }
 
-    /// installing a package
+    fn find_package_version(&self, pkg_name: &str, which: Option<&str>) -> AResult<(search::SingleListing, Versioning)> {
+
+        tracing::trace!(pkg_name, which, "find_package_version");
+
+        // get search results for just this package name
+        let mut results = self.search_results(pkg_name, true)?;
+
+        if results.len() != 1 {
+            anyhow::bail!("could not find package '{pkg_name}'");
+        }
+
+        let versions = results.iter_mut().next().unwrap().1;
+
+        // `which` could be a channel, check if it is
+        //let mut channel = None;
+        let mut versioning = Versioning::default();
+
+        if let Some(v) = which {
+
+            if versions.iter().any(|(_version, info)| info.channels.iter().any(|c| c == v)) {
+                // channel found, filter out versions that are not on this channel
+                versions.retain(|_version, info| info.channels.iter().any(|c| c == v));
+                //channel = Some(v);
+                versioning.pinned_to_channel = true;
+                versioning.channel = Some(v.to_string());
+
+            } else {
+                // must be a specific version, find it
+
+                versions.retain(|version, _info| version == v);
+                versioning.pinned_to_version = true;
+            }
+
+            if versions.is_empty() {
+                anyhow::bail!("could not find version or channel '{v}' for package '{pkg_name}'");
+            }
+        }
+
+        if versions.is_empty() {
+            anyhow::bail!("no versions available for package '{pkg_name}'");
+        }
+
+        {
+            // keep only the last version
+            let (version, urlfn) = versions.pop_last().unwrap();
+            versions.clear();
+            versions.insert(version, urlfn);
+        }
+
+        //dbg!(versions);
+
+        // take the greatest package version
+        let result = search::flatten(results);
+        let result = result.into_iter().next().unwrap();
+
+        //dbg!(&result);
+        //dbg!(&versioning);
+
+        Ok((result, versioning))
+    }
+
+    /// subcommand for installing a package
     pub fn install_cmd(&mut self, pkg_name: &String) -> AResult<()> {
         self.create_load_db()?;
 
@@ -254,39 +342,28 @@ impl App {
         create_dir(&self.config.cache_dir)?;
 
         // installing from a package file
-        if pkg_name.ends_with(PACKAGE_EXT) && let Ok(true) = std::path::Path::new(pkg_name).try_exists() {
+        {
+            let path = Path::new(pkg_name);
+            let filename = path.file_name().map(|s| s.to_string_lossy().to_string());
+            if let Ok(true) = path.try_exists() && let Some(filename) = filename && package::is_packagefile_name(&filename) {
 
-            println!("installing from package file {pkg_name}");
+                tracing::trace!("installing from package file {pkg_name}");
 
-            // TODO check that the package file is not a path to a file in the cache dir
-            // (DO NOT COPY IN PLACE)
+                // TODO check that the package file is not a path to a file in the cache dir
+                // (DO NOT COPY IN PLACE)
 
-            //dbg!(&pkg_name);
-            //dbg!(&self.config.cache_dir);
+                let cache_path = join_path!(&self.config.cache_dir, filename);
 
-            let pkg_filepath = Path::new(pkg_name);
-            let pkg_filename = pkg_filepath
-                .file_name()
-                .expect("invalid filepath")
-                .to_str()
-                .expect("invalid filepath");
+                // copy to the cache dir
+                std::fs::copy(path, &cache_path).context("failed to copy package file")?;
 
-            if !pkg::named_properly(pkg_filename) {
-                anyhow::bail!("package name is invalid");
+                //TODO sanity check file contents
+
+                return self.install_pkg_file(cache_path, Versioning::default());
             }
-
-            let mut cached_filepath = PathBuf::new();
-            cached_filepath.push(&self.config.cache_dir);
-            cached_filepath.push(pkg_filename);
-
-            // copy to the cache dir
-            std::fs::copy(pkg_filepath, &cached_filepath).context("failed to copy package file")?;
-
-            return self.install_pkg_file(cached_filepath);
         }
 
         // installing from provider
-        println!("installing from provider");
 
         let mut split = pkg_name.split('@');
 
@@ -297,26 +374,29 @@ impl App {
             Some(name) => name,
         };
 
-        let version = match split.next() {
-            Some("") | None => None,
-            Some(v) => Some(Version::parse(v).context("invalid version format")?),
+        let (listing, versioning) = self.find_package_version(pkg_name, split.next())?;
+        let version = Version::new(&listing.version);
+
+        //dbg!(&listing);
+        //dbg!(&versioning);
+        //dbg!(&version);
+
+        tracing::debug!(pkg_name, version=version.as_str(), "installing from provider");
+
+        let id = PackageID {
+            name: pkg_name.to_string(),
+            version: version.to_string(),
         };
 
-        dbg!(&pkg_name);
-        dbg!(&version);
-
-        let version = match version {
-            Some(v) => v,
-            None => {
-                // get the latest version
-                println!("fetching latest version");
-                self.find_latest_version(pkg_name)?
-            }
+        let cached_file = if let Some(cached_file) = self.get_cached_package_path(&id) {
+            cached_file
+        } else {
+            let cached_file = self.cache_fetch_cmd(&id)?;
+            cached_file
         };
 
-        println!("installing {pkg_name} {version}");
-        let cached_filepath = self.cache_fetch_cmd(pkg_name, &version)?;
-        return self.install_pkg_file(cached_filepath);
+        tracing::debug!("installing {pkg_name} {version}");
+        return self.install_pkg_file(cached_file, versioning);
     }
 
     /// verify package state
@@ -330,7 +410,7 @@ impl App {
 
         // all given names must be installed
         for name in pkgs {
-            let find = self.db.installed.iter().find(|&ent| ent.metadata.id.name == name.as_ref());
+            let find = self.db.installed.iter().find(|&ent| ent.metadata.name == name.as_ref());
             if find.is_none() {
                 anyhow::bail!("package named '{}' is not installed", name.as_ref());
             }
@@ -339,14 +419,14 @@ impl App {
         let filtering = !pkgs.is_empty();
         let iter = self.db.installed.iter().filter(|&ent| {
             if filtering {
-                pkgs.iter().any(|name| name.as_ref() == ent.metadata.id.name)
+                pkgs.iter().any(|name| name.as_ref() == ent.metadata.name)
             } else {
                 true
             }
         });
 
         for pkg in iter {
-            println!("verifying package {}", pkg.metadata.id.name);
+            println!("verifying package {}", pkg.metadata.name);
 
             let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
             for (filepath, fileinfo) in pkg.metadata.files.iter() {
@@ -356,9 +436,10 @@ impl App {
                     continue;
                 }
 
-                let mut path = root_dir.clone();
                 let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
-                path.push(filepath);
+
+                let path = join_path!(&root_dir, filepath);
+
                 println!("checking file at {path:?} for hash {db_hash}");
 
                 if !path.exists() {
@@ -366,11 +447,10 @@ impl App {
                     continue;
                 }
 
-                let file = std::fs::File::open(&path)?;
+                let file = File::open(&path)?;
                 let reader = std::io::BufReader::new(file);
                 let hash = pkg::blake2_hash_reader(reader)?;
 
-                //println!("got hash {hash}");
                 if &hash == db_hash {
                     println!("ok  -- {:?}", &path);
                 } else {
@@ -391,21 +471,89 @@ impl App {
 
         self.load_db()?;
 
-        let found = self.db.installed.iter().find(|e| &e.metadata.id.name == pkg_name);
+        let found = self.db.installed.iter().find(|e| &e.metadata.name == pkg_name);
 
         let pkg = match found {
-            None => anyhow::bail!("package '{pkg_name}' not installed"),
+            None => {
+                println!("package '{pkg_name}' not installed");
+                std::process::exit(0);
+                //anyhow::bail!("package '{pkg_name}' not installed"),
+            }
             Some(pkg) => pkg,
         };
 
+        self.delete_package_files(pkg)?;
+        self.db.remove_package(pkg.metadata.id());
+        self.save_db()?;
+        Ok(())
+    }
+
+    fn delete_package_files(&self, pkg: &db::DbPkg) -> AResult<()> {
+
         //dbg!(pkg);
 
+        // TODO actually delete the files
+
+        let mut dirs = Vec::new();
+
         for (filepath, fileinfo) in &pkg.metadata.files {
-            println!("removing {filepath}");
-            // TODO actually delete the files
+            //println!("removing {filepath}");
+            //dbg!(fileinfo);
+            match &fileinfo.filetype {
+                package::FileType::Link(to) => {
+                    let path = get_pkg_file_path(pkg, filepath)?;
+                    println!("removing {filepath} -> {to}");
+                    println!("         {}", path.display());
+                    std::fs::remove_file(path)?;
+                }
+                package::FileType::File => {
+                    let path = get_pkg_file_path(pkg, filepath)?;
+                    println!("removing {filepath}");
+                    println!("         {}", path.display());
+                    std::fs::remove_file(path)?;
+                }
+                package::FileType::Dir => {
+                    let path = get_pkg_file_path(pkg, filepath)?;
+                    dirs.push(path);
+                }
+            }
+        }
+
+        dirs.reverse();
+        for path in dirs {
+            println!("removing dir {}", path.display());
+            std::fs::remove_dir(path)?;
         }
 
         Ok(())
     }
+
+    pub fn scan_cmd(&self) -> AResult<()> {
+
+        tracing::trace!("scanning providers");
+
+        // make sure there is a cache/provider dir to cache search results in
+        create_dir(join_path!(&self.config.cache_dir, "provider"))?;
+
+        for provider in &self.config.providers {
+            let list = provider.as_provide().scan();
+
+            if let Ok(list) = list {
+                // write the package list to a cache file
+
+                let s = serde_json::to_string(&list)?;
+                //let s = serde_json::to_string_pretty(&list)?;
+                let mut file = File::create(&provider.cache_file)?;
+                file.write_all(s.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
 }
 
+fn get_pkg_file_path(pkg: &db::DbPkg, path: &str) -> AResult<PathBuf> {
+    let mut fullpath = PathBuf::from(pkg.location.as_ref().context("package has no location")?);
+    fullpath.push(path);
+    //Ok(fullpath.canonicalize()?) // can't canonicalize because that resolves symlinks
+    Ok(fullpath)
+}

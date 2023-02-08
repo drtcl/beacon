@@ -3,11 +3,9 @@ use crate::fetch::*;
 use crate::provider::Provide;
 use crate::search::*;
 use httpsearch;
+use package::PackageID;
 use serde_derive::Serialize;
 use std::io::Write;
-
-use package::PackageID;
-use crate::pkg;
 
 #[derive(Debug, Serialize)]
 pub struct Http {
@@ -20,51 +18,110 @@ impl Http {
     }
 }
 
+//impl Search for Http {
+//    fn search(&self, needle: &str) -> SearchResults {
+//        tracing::debug!("-- [Search] Http::search '{needle}' -- ");
+//
+//        let client = httpsearch::Client::new();
+//        let names = httpsearch::get_package_names_all(&client, &self.url);
+//
+//        let mut results = SearchResults::new();
+//
+//        if let Ok(names) = names {
+//            for name in names {
+//                if name.contains(needle) {
+//                    let versions = httpsearch::get_package_versions_all(&client, &self.url, &name);
+//                    if let Ok(versions) = versions {
+//
+//                        let prefix = format!("{name}-");
+//                        let suffix = format!(".{}", package::PKG_FILE_EXTENSION);
+//
+//                        let versions: Vec<_> = versions.iter().map(|v| {
+//                            let mut v = v.as_str();
+//                            if v.starts_with(&prefix) {
+//                                v = &v[prefix.len()..];
+//                            }
+//                            if v.ends_with(&suffix) {
+//                                v = v.strip_suffix(&suffix).unwrap();
+//                            }
+//                            v.to_string()
+//                        }).collect();
+//
+//                        results.inner.insert(
+//                            (&name).into(),
+//                            SearchResult {
+//                                name: (&name).into(),
+//                                versions: versions
+//                                    .iter()
+//                                    .filter_map(|s| semver::Version::parse(s).ok())
+//                                    .collect(),
+//                            },
+//                        );
+//                    }
+//                }
+//            }
+//        }
+//
+//        //dbg!(&results);
+//        results
+//    }
+//}
+
+impl From<httpsearch::VersionInfo> for VersionInfo {
+    fn from(value: httpsearch::VersionInfo) -> Self {
+        Self {
+            url: value.url,
+            filename: value.filename,
+            channels: value.channels,
+        }
+    }
+}
+
 impl Search for Http {
-    fn search(&self, pkg_name: &str) -> SearchResults {
-        println!("-- [Search] Http::search '{pkg_name}' -- ");
+    fn search(&self, needle: &str) -> AResult<PackageList> {
+        tracing::debug!("[Search] Http::search '{needle}'");
 
-        let client = httpsearch::Client::new();
-        let names = httpsearch::get_package_names_all(&client, &self.url);
+        let mut pkgs = httpsearch::full_scan(None, &self.url)?;
 
-        let mut results = SearchResults::new();
+        pkgs.retain(|name, _versions| {
+            name.contains(needle)
+        });
 
-        if let Ok(names) = names {
-            for name in names {
-                if name.contains(pkg_name) {
-                    let versions = httpsearch::get_package_versions_all(&client, &self.url, &name);
-                    if let Ok(versions) = versions {
-                        results.inner.insert(
-                            (&name).into(),
-                            SearchResult {
-                                name: (&name).into(),
-                                versions: versions
-                                    .iter()
-                                    .filter_map(|s| semver::Version::parse(s).ok())
-                                    .collect(),
-                            },
-                        );
-                    }
-                }
+        let mut ret = PackageList::new();
+        for (name, versions) in pkgs {
+            for (version, urlfilename) in versions {
+                ret.entry(name.to_string())
+                    .or_default()
+                    .insert(version, VersionInfo::from(urlfilename));
             }
         }
 
-        results
+        Ok(ret)
+    }
+
+    fn scan(&self) -> AResult<PackageList> {
+
+        let pkgs = httpsearch::full_scan(None, &self.url)?;
+
+        let mut ret = PackageList::new();
+        for (name, versions) in pkgs {
+            for (version, urlfilename) in versions {
+                ret.entry(name.to_string())
+                    .or_default()
+                    .insert(version, VersionInfo::from(urlfilename));
+            }
+        }
+        Ok(ret)
     }
 }
 
 impl Fetch for Http {
-    fn fetch(&self, pkg: &PackageID, write: &mut dyn Write) -> AResult<u64> {
-        let ver = semver::Version::parse(&pkg.version)?;
-        let filename = pkg::to_filename(&pkg.name, &ver);
-        let url = format!(
-            "{}/{}/{}.{}.{}/{}",
-            &self.url, &pkg.name, ver.major, ver.minor, ver.patch, filename
-        );
-        dbg!(&url);
+    fn fetch(&self, write: &mut dyn Write, pkg: &PackageID, url: &str) -> AResult<u64> {
 
-        let client = httpsearch::Client::new();
-        let n = httpsearch::download(&client, &url, write)?;
+        tracing::trace!(pkg=?pkg, url, "Http::fetch()");
+
+        //let client = httpsearch::Client::new();
+        let n = httpsearch::download(None, url, write)?;
         Ok(n)
     }
 }

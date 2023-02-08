@@ -7,26 +7,27 @@
 //   - package descriptions
 //   - README / docs for packages
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
+//#![allow(dead_code)]
+//#![allow(unused_imports)]
+//#![allow(unused_variables)]
 
 use anyhow::{Context, Result};
 use blake2::{Blake2b, Digest};
 use clap::{Arg, ArgAction};
 use indicatif::ProgressBar;
 use semver::Version;
-use std::io::{BufWriter, BufReader, BufRead, Read, Write};
+use std::fs::File;
+use std::io::{BufWriter, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const ZSTD_LEVEL : i32 = 15;
+const ZSTD_LEVEL : i32 = 10;
 
 fn get_threads() -> u32 {
     let t = std::thread::available_parallelism().map_or(1, |v| v.get() as u32);
-    let t = std::cmp::min(20, t);
+
     //println!("using {t} threads");
-    t
+    std::cmp::min(20, t)
 }
 
 // take a list of files
@@ -52,6 +53,7 @@ impl From<FileType> for package::FileType {
             FileType::Dir => package::FileType::Dir,
             FileType::File => package::FileType::File,
             FileType::Link(path) => package::FileType::Link(format!("{}", path.display())),
+            //FileType::Link(path) => package::FileType::Link{to: format!("{}", path.display())},
         }
     }
 }
@@ -69,14 +71,14 @@ struct FileListing {
     files: Vec<FileEntry>,
 }
 
-impl FileListing {
-    fn new() -> Self {
-        FileListing { files: Vec::new() }
-    }
-    fn extend(&mut self, other: Self) {
-        self.files.extend(other.files.into_iter());
-    }
-}
+//impl FileListing {
+//    fn new() -> Self {
+//        FileListing { files: Vec::new() }
+//    }
+//    fn extend(&mut self, other: Self) {
+//        self.files.extend(other.files.into_iter());
+//    }
+//}
 
 fn file_discovery(paths: Vec<String>) -> FileListing {
 
@@ -139,54 +141,79 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("no-cleanup")
                 .long("no-cleanup")
-                .action(ArgAction::SetTrue),
+                .action(ArgAction::SetTrue)
         )
         .arg(
             Arg::new("name")
                 .short('n')
                 .long("name")
                 .required(true)
-                .help("The name of the package"),
+                .help("The name of the package")
+        )
+        .arg(
+            Arg::new("wrap-with-dir")
+                .long("wrap-with-dir")
+                .required(false)
+                .action(ArgAction::Set)
+                .value_name("dir name")
+                .help("Wrap all files into one root dir")
         )
         .arg(
             Arg::new("version")
                 .long("version")
                 .required(true)
-                .help("The pacakges's version"),
+                .help("The pacakges's version")
         )
         .arg(
             Arg::new("verbose")
                 .long("verbose")
                 .required(false)
-                .action(ArgAction::SetTrue), //.default_value("0")
-                                             //.help("verbosity level"), //.validator(is_int)
+                .action(ArgAction::SetTrue)
+                //.default_value("0")
+                //.help("verbosity level") //.validator(is_int)
         )
         .arg(
             Arg::new("ignore-file")
                 .long("ignore-file")
                 .value_hint(clap::ValueHint::FilePath)
                 .value_name("path")
-                .required(false), //.default_value("")
+                .required(false)
+                //.default_value("")
         )
-        .arg(Arg::new("mount").long("mount").required(true))
+        .arg(
+            Arg::new("mount")
+                .long("mount")
+                .required(true)
+                .help("mount point to install into")
+        )
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
                 .short('o')
                 .value_name("dir")
-                .required(false), //.default_value("`cwd`")
+                .required(false)
+                .help("directory to put the built package file")
+        )
+        .arg(
+            Arg::new("compress-level")
+                .short('c')
+                .value_name("level")
+                .default_value("0")
+                .required(false)
+                .help("compression level")
+                .value_parser(clap::value_parser!(u32))
         )
         .arg(
             Arg::new("depend")
                 .long("depend")
                 .action(clap::ArgAction::Append)
                 .value_name("pkg[@version]")
-                .help("Add a dependency"),
+                .help("Add a dependency")
         )
         .arg(
             Arg::new("file")
                 .action(clap::ArgAction::Append)
-                .required(true),
+                .required(true)
         )
         .get_matches();
 
@@ -199,6 +226,31 @@ fn main() -> Result<()> {
     let package_name = matches.get_one::<String>("name").unwrap();
 
     let verbose = *matches.get_one::<bool>("verbose").unwrap();
+
+    let deps: Vec<(String, Option<String>)> = matches.get_many::<String>("depend")
+        .map(|refs| refs.into_iter().map(|s| s.to_string()).collect())
+        .unwrap_or(Vec::new())
+        .iter()
+        .map(|s| {
+            let mut iter = s.split('@');
+            let name = iter.next().expect("package name required");
+            if name.is_empty() {
+                println!("nameless package dependency was given: '{}'", s);
+                std::process::exit(2);
+            }
+            let version = iter.next().map(|s| s.to_string());
+            (name.to_string(), version)
+        })
+        .collect();
+
+    let compress_level = *matches.get_one::<u32>("compress-level").expect("expected compression level") as i32;
+    let compress_level = if 0 == compress_level { ZSTD_LEVEL } else { compress_level };
+    dbg!(&compress_level);
+
+    //let compress_level = matches.get_one::<String>("compress-level");
+    //dbg!(&compress_level);
+    //let compress_level = compress_level.map(|v| v.as_str().parse::<i32>().expect("invalid compression level")).map_or(ZSTD_LEVEL, |v| if v == 0 { ZSTD_LEVEL } else { v });
+    //dbg!(&compress_level);
 
     //let root_dir = matches.get_one::<String>("root").unwrap();
     //let root_dir = std::fs::canonicalize(root_dir).expect("failed to canonicalize root dir");
@@ -217,7 +269,7 @@ fn main() -> Result<()> {
 //            anyhow::bail!("ignore-file does not exist");
 //        }
 //        //let ig = ignore::gitignore::GitignoreBuilder::new(
-//        //let read = std::io::BufReader::new(std::fs::File::open(ignore_file)?);
+//        //let read = std::io::BufReader::new(File::open(ignore_file)?);
 //        //for line in read.lines() {
 //        //    let line = line?;
 //        //    //println!("read line {line}");
@@ -235,6 +287,8 @@ fn main() -> Result<()> {
         }
     };
 
+    let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
+
     // the file names
     // - data - all target file in the package
     // - meta - meta data about data files
@@ -249,7 +303,7 @@ fn main() -> Result<()> {
 
     let mut package_file_path = PathBuf::new();
     package_file_path.push(&output_dir);
-    package_file_path.push(format!("{}-{}.bpm.tar", package_name, package_version));
+    package_file_path.push(format!("{}-{}{}", package_name, package_version, package::DOTTED_PKG_FILE_EXTENSION));
 
     //    let mut file_listing = FileListing::new();
     //    for path in matches.get_many::<String>("file").unwrap() {
@@ -258,22 +312,25 @@ fn main() -> Result<()> {
 
     // -- begin work --
 
-    let file_listing = file_discovery(
-        matches
-            .get_many::<String>("file")
-            .unwrap()
-            .cloned()
-            .collect(),
+    let mut file_listing = file_discovery(
+        matches.get_many::<String>("file").unwrap().cloned().collect(),
     );
-    //dbg!(&file_listing);
+    if let Some(wrap_with_dir) = wrap_with_dir {
+        for ent in file_listing.files.iter_mut() {
+            let mut p = PathBuf::from(wrap_with_dir);
+            p.push(&ent.pkg_path);
+            ent.pkg_path = p;
+            //let path = std::mem::replace(&mut ent.pkg_path, PathBuf::new());
+        }
+    }
 
     // scan the file list and verify symlinks
     //verify_symlinks(&file_listing);
 
-    let data_tar_file = BufWriter::new(std::fs::File::create(tarball_file_path.as_path())?);
+    //let data_tar_file = BufWriter::new(File::create(tarball_file_path.as_path())?);
+    let data_tar_file = BufWriter::with_capacity(1024 * 1024, File::create(tarball_file_path.as_path())?);
     let mut data_tar_hasher = HashingWriter::new(data_tar_file, Blake2b::new());
-    let mut data_tar_file =
-        zstd::stream::write::Encoder::new(&mut data_tar_hasher, ZSTD_LEVEL)?;
+    let mut data_tar_file = zstd::stream::write::Encoder::new(&mut data_tar_hasher, compress_level)?;
 
     #[cfg(feature="mt")]
     data_tar_file.multithread(get_threads())?;
@@ -281,9 +338,6 @@ fn main() -> Result<()> {
     let mut data_tar_file = data_tar_file.auto_finish();
     let mut data_tar = tar::Builder::new(&mut data_tar_file);
     data_tar.follow_symlinks(false);
-
-    let deps: Vec<(String, String)> = Vec::new();
-    //let deps = vec![("foo", "3.1.4"), ("honk", "4.0.1")];
 
     let mut meta = package::MetaData::new(package::PackageID {
         name: package_name.clone(),
@@ -296,9 +350,10 @@ fn main() -> Result<()> {
    //     });
    // }
     for pair in &deps {
-        meta.add_dependency(package::PackageID {
+        meta.add_dependency(package::DependencyID{
             name: pair.0.clone(),
-            version: pair.1.clone(),
+            //version: pair.1.clone(),
+            version: Some(pair.1.as_ref().map_or("*".to_string(), |v| v.clone())),
         });
     }
 
@@ -307,13 +362,10 @@ fn main() -> Result<()> {
         indicatif::ProgressStyle::with_template(
             "{spinner} {wide_bar:.blue/white} {pos}/{len} {elapsed} {eta}",
         )
+        .unwrap()
         //.progress_chars("█▇▆▅▄▃▂▁ █")
-        .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(200));
-
-    let slow = file_listing.files.len() < 20;
-    let slow = false;
 
     // create the target install files tar file
     for mut entry in file_listing.files {
@@ -326,7 +378,7 @@ fn main() -> Result<()> {
                 }
             }
             FileType::File => {
-                let fd = std::fs::File::open(&entry.full_path).context("opening file")?;
+                let fd = File::open(&entry.full_path).context("opening file")?;
                 //let file_size = fd.metadata()?.len();
 
                 let mut header = tar::Header::new_gnu();
@@ -383,9 +435,6 @@ fn main() -> Result<()> {
         });
 
         pb.inc(1);
-        if slow {
-            std::thread::sleep(Duration::from_millis(50));
-        } //TODO dd
     }
 
     data_tar.finish()?;
@@ -401,13 +450,14 @@ fn main() -> Result<()> {
     meta.mount = Some(mount.clone());
 
     {
-        let mut metafile = std::io::BufWriter::new(std::fs::File::create(&meta_file_path)?);
+        let mut metafile = BufWriter::new(File::create(&meta_file_path)?);
         meta.to_writer(&mut metafile)?;
     }
 
     // --- create a single tar package file ---
-    let pkg_file = std::fs::File::create(&package_file_path)?;
-    let pkg_file = BufWriter::new(pkg_file);
+    let pkg_file = File::create(&package_file_path)?;
+    //let pkg_file = BufWriter::new(pkg_file);
+    let pkg_file = BufWriter::with_capacity(1024 * 1024, pkg_file);
     let mut hasher = HashingWriter {
         hasher: Blake2b::new(),
         inner: pkg_file,
@@ -496,6 +546,7 @@ impl<Inner, Hasher> HashingWriter<Inner, Hasher> {
     }
 }
 
+#[allow(dead_code)]
 fn normalize_path(path: PathBuf) -> PathBuf {
     let mut ret = PathBuf::new();
     for i in path.iter() {
@@ -567,7 +618,7 @@ fn canonicalize_no_symlink(path: &Path) -> Result<PathBuf> {
 //    // --- write toml data ---
 //    {
 //        // now create a file that lists all included file paths and their hash
-//        let metafile = std::fs::File::create(&meta_file_path)?;
+//        let metafile = File::create(&meta_file_path)?;
 //        let mut metafile = BufWriter::new(metafile);
 //
 //        let mut map = toml::map::Map::new();

@@ -1,33 +1,28 @@
 use anyhow::Result;
 use httpsearch::*;
 
-fn join_url(parts: &[&str]) -> String {
-    parts.iter().map(|&e| String::from(e)).collect::<Vec<_>>().as_slice().join("/")
-}
-
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let url = args.next();
-    if url.is_none() {
-        anyhow::bail!("expected url");
+
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .without_time()
+        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    let url = std::env::args().nth(1).expect("expected url");
+
+    let mut url = String::from(&url);
+    if !url.starts_with("http") {
+        url.insert_str(0, "http://");
     }
 
-    let mut root_url = String::from(strip_slash(&url.unwrap()));
-    if !root_url.starts_with("http") {
-        root_url.insert_str(0, "http://");
-    }
-    root_url.push_str("/pkg");
+    let packages = full_scan(None, &url)?;
 
-    // re-usable client connection
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()?;
-
-    let packages = get_package_names_all(&client, &root_url)?;
-
-    for name in &packages {
-        let versions = get_package_versions_all(&client, &root_url, name)?;
-        println!("{name:-10} {versions:?}");
+    for (name, version_map) in &packages {
+        //println!("{} {}", name, version_map.keys().last().unwrap());
+        println!("{} {:?}", name, version_map.keys());
     }
 
     Ok(())
@@ -37,20 +32,21 @@ fn main() -> Result<()> {
 mod test {
     use super::*;
 
+    fn join_url(parts: &[&str]) -> String {
+        parts.iter().map(|&e| String::from(e)).collect::<Vec<_>>().as_slice().join("/")
+    }
+
     /// NOTE: must be serving on localhost:8000 and must have the foo-1.0.0 package
     #[test]
     fn download_foo() -> Result<()> {
-
-        let root_url = "http://localhost:8000/pkg";
-
-        let client = reqwest::blocking::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()?;
+        let port = std::option_env!("PKG_PORT").or(Some("8000")).unwrap();
+        let root_url = format!("http://localhost:{port}/pkg");
 
         let filename = "foo-1.0.0.bpm.tar";
+
         let mut file = std::fs::File::create(filename)?;
-        let url = join_url(&[root_url, "foo", "1.0.0", filename].as_slice());
-        download(&client, &url, &mut file)?;
+        let url = join_url(&[&root_url, "foo", filename].as_slice());
+        download(None, &url, &mut file)?;
 
         let exists = std::path::Path::new(&filename).try_exists()?;
         assert!(exists);

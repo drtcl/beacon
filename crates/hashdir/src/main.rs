@@ -57,7 +57,7 @@ fn get_dir_hash(dir: &Path, show_files: bool) -> Result<String> {
     let mut final_hasher = Hasher::new();
 
     let mut files = Vec::<(PathBuf, Option<String>)>::new();
-    for entry in WalkDir::new(&dir).sort(true) {
+    for entry in WalkDir::new(dir).sort(true) {
         let entry = entry.expect("failed to get file netry");
         if entry.file_type().is_file() {
             let path = PathBuf::from(&entry.path());
@@ -67,7 +67,7 @@ fn get_dir_hash(dir: &Path, show_files: bool) -> Result<String> {
 
     files.par_iter_mut().for_each(|(path, hash)| {
         *hash = Some(get_file_hash(path).expect("failed to get file hash"));
-        let sub_path = remove_path_prefix(Path::new(&dir), &path);
+        let sub_path = remove_path_prefix(Path::new(&dir), path);
         *path = PathBuf::from(sub_path);
     });
 
@@ -76,7 +76,7 @@ fn get_dir_hash(dir: &Path, show_files: bool) -> Result<String> {
             println!("{} {}", &hash.as_ref().unwrap(), path.display())
         }
         write!(&mut final_hasher, "{}", path.display())?;
-        final_hasher.write(hash.unwrap().as_bytes())?;
+        final_hasher.write_all(hash.unwrap().as_bytes())?;
     }
     Ok(final_hasher.finish())
 }

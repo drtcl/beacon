@@ -10,6 +10,9 @@ use std::io::Seek;
 use std::fs::File;
 use std::path::Path;
 
+pub const PKG_FILE_EXTENSION: &str = "bpm";
+pub const DOTTED_PKG_FILE_EXTENSION: &str = ".bpm";
+
 pub type PkgName = String;
 pub type Version = String;
 pub type FilePath = String;
@@ -23,15 +26,23 @@ pub const META_FILE_NAME: &str = "meta.yaml";
 #[cfg(feature = "toml")]
 pub const META_FILE_NAME: &str = "meta.toml";
 
+#[cfg(feature = "json")]
+pub const META_FILE_NAME: &str = "meta.json";
+
 const FILE_ATTR: &str = "f";
 const DIR_ATTR: &str = "d";
 const SYMLINK_ATTR: &str = "s";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag="filetype")]
 pub enum FileType {
     Dir,
     File,
     Link(String),
+    //Link{
+    //    //#[serde(rename="link")]
+    //    to: String
+    //},
 }
 
 impl FileType {
@@ -43,14 +54,15 @@ impl FileType {
     }
     pub fn is_link(&self) -> bool {
         matches!(self, FileType::Link(_))
+        //matches!(self, FileType::Link{to})
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-//#[serde(try_from = "FileInfoString")]
-//#[serde(into = "FileInfoString")]
+#[serde(try_from = "FileInfoString")]
+#[serde(into = "FileInfoString")]
 pub struct FileInfo {
-    #[serde(rename = "type")]
+    //#[serde(rename = "type")]
     pub filetype: FileType,
 
     #[serde(default)]
@@ -65,12 +77,20 @@ pub struct PackageID {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DependencyID {
+    pub name: String,
+    pub version: Option<Version>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MetaData {
-    #[serde(flatten)]
-    pub id: PackageID,
+    //#[serde(flatten)]
+    //pub id: PackageID,
+    pub name: String,
+    pub version: Version,
     pub mount: Option<String>,
     pub data_hash: Option<String>,
-    pub dependencies: OrderedMap<PkgName, Version>,
+    pub dependencies: OrderedMap<PkgName, Option<Version>>,
     pub files: OrderedMap<FilePath, FileInfo>,
 }
 
@@ -85,6 +105,7 @@ impl From<FileInfo> for FileInfoString {
             FileType::Dir => ret.push_str(DIR_ATTR),
             FileType::File => ret.push_str(FILE_ATTR),
             FileType::Link(to) => {
+            //FileType::Link{to} => {
                 ret.push_str(SYMLINK_ATTR);
                 ret.push(':');
                 ret.push_str(&to);
@@ -110,6 +131,7 @@ impl TryFrom<FileInfoString> for FileInfo {
             Some(SYMLINK_ATTR) => {
                 let to = iter.next().map(str::to_owned);
                 to.map(FileType::Link)
+                //to.map(|s| FileType::Link{to: s})
             }
             Some(_) | None => None,
         };
@@ -130,11 +152,20 @@ impl TryFrom<FileInfoString> for FileInfo {
 impl MetaData {
     pub fn new(id: PackageID) -> Self {
         Self {
-            id,
+            //id,
+            name: id.name,
+            version: id.version,
             mount: None,
             data_hash: None,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
+        }
+    }
+
+    pub fn id(&self) -> PackageID {
+        PackageID {
+            name: self.name.clone(),
+            version: self.version.clone(),
         }
     }
 
@@ -151,7 +182,7 @@ impl MetaData {
         let mut contents = String::new();
         r.read_to_string(&mut contents)?;
         let meta = toml::from_str::<Self>(&contents)?;
-        dbg!(&meta);
+        //dbg!(&meta);
         Ok(meta)
     }
 
@@ -167,7 +198,20 @@ impl MetaData {
         Ok(ret)
     }
 
-    pub fn add_dependency(&mut self, id: PackageID) {
+    #[cfg(feature = "json")]
+    pub fn to_writer<W: Write>(&self, w: &mut W) -> Result<()> {
+        //serde_json::to_writer(w, self)?;
+        serde_json::to_writer_pretty(w, self)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "json")]
+    pub fn from_reader<R: Read>(r: &mut R) -> Result<Self> {
+        let ret: Self = serde_json::from_reader(r)?;
+        Ok(ret)
+    }
+
+    pub fn add_dependency(&mut self, id: DependencyID) {
         self.dependencies.insert(id.name, id.version);
     }
 
@@ -187,14 +231,12 @@ impl MetaData {
 pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> Result<tar::Entry<'a, R>>
     where R: Read + Seek
 {
-    println!("seek_to_tar_entry {}", needle);
     for entry in tar.entries_with_seek()? {
-        println!("entry {:?}", entry.as_ref().unwrap().path());
         if let Ok(path) = entry.as_ref().unwrap().path() && path == Path::new(needle) {
             return Ok(entry?);
         }
     }
-    return Err(anyhow::anyhow!("path not found in tar archive"));
+    Err(anyhow::anyhow!("path {} not found in tar archive", needle))
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
@@ -202,7 +244,6 @@ pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
     let mut tar = tar::Archive::new(pkg_file);
     let mut meta = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
     let metadata = MetaData::from_reader(&mut meta)?;
-    println!("get_metadata {:?}", metadata);
     Ok(metadata)
 }
 
@@ -211,29 +252,73 @@ pub fn get_filelist(pkg_file: &mut File) -> Result<OrderedMap<FilePath, FileInfo
     Ok(metadata.files)
 }
 
+/// "foo-1.2.3" -> ("foo", "1.2.3")
+/// "foo-1.2.3.bpm" -> ("foo", "1.2.3")
+pub fn split_parts(filename: &str) -> Option<(&str, &str)> {
+    filename.split_once('-').map(|(name, mut version)| {
+        if version.ends_with(DOTTED_PKG_FILE_EXTENSION) {
+            version = version.strip_suffix(DOTTED_PKG_FILE_EXTENSION).unwrap();
+        }
+        (name, version)
+    })
+}
+
+/// Names like "foo-1.0.0.bpm" and "bar-0.2.1.bpm" are packagefile names
+pub fn is_packagefile_name(text: &str) -> bool {
+    if text.ends_with(DOTTED_PKG_FILE_EXTENSION) {
+        if let Some((name, version)) = split_parts(text) {
+            if is_package_name(name) && is_version_string(version) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Names like "foo" and "bar" are package names
+pub fn is_package_name(text: &str) -> bool {
+    // cannot contain a '.' or '-'
+    // cannot be empty string
+    !text.contains('.') && !text.contains('-') && !text.is_empty()
+}
+
+/// strings like "1.2.3" and "0.0.1-alpha+linux" are version strings
+pub fn is_version_string(text: &str) -> bool {
+    // cannot be empty string
+    // cannot contain the file extension
+    !text.is_empty() && !text.contains(PKG_FILE_EXTENSION)
+}
+
+pub fn filename_match(filename: &str, id: &PackageID) -> bool {
+    if let Some((name, version)) = split_parts(filename) {
+        return name == id.name && version == id.version;
+    }
+    false
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     fn get_instance() -> MetaData {
         let mut meta = MetaData {
-            id: PackageID {
+            //id: PackageID {
                 name: "foo".into(),
                 version: "1.2.3".into(),
-            },
+            //},
             mount: Some("EXT".into()),
             data_hash: None,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
         };
 
-        meta.add_dependency(PackageID {
+        meta.add_dependency(DependencyID {
             name: "bar".into(),
-            version: "3.1.4".into(),
+            version: Some("3.1.4".into()),
         });
-        meta.add_dependency(PackageID {
+        meta.add_dependency(DependencyID {
             name: "baz".into(),
-            version: "0.7.1".into(),
+            version: Some("0.7.1".into()),
         });
 
         meta.add_file(
@@ -276,6 +361,7 @@ mod test {
         meta.to_writer(&mut output)?;
         println!("{}", String::from_utf8_lossy(&output));
         let ret = MetaData::from_reader(&mut std::io::Cursor::new(output.as_slice()))?;
+        dbg!(&ret);
         assert_eq!(meta, ret);
         Ok(())
     }

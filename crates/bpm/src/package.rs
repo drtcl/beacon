@@ -1,11 +1,8 @@
-use anyhow::Context;
 use blake2::{Blake2b, Digest};
 use crate::AResult;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
 use std::fs::File;
 use std::io::{Read, Seek};
-use std::path::Path;
 use std::path::PathBuf;
 
 fn semver_ser<S>(version: &semver::Version, s: S) -> Result<S::Ok, S::Error>
@@ -48,9 +45,9 @@ where
 //    return Err(anyhow::anyhow!("path not found in tar archive"));
 //}
 
-type FilePath = String;
-type FileHash = String;
-type FileHashes = HashMap<FilePath, FileHash>;
+//type FilePath = String;
+//type FileHash = String;
+//type FileHashes = HashMap<FilePath, FileHash>;
 
 //pub fn get_mountpoint(pkg_file: &mut File) -> AResult<Option<String>> {
 //
@@ -188,13 +185,12 @@ pub fn hex_string(data: &[u8]) -> String {
 }
 
 pub fn name_parts(name: &str) -> Option<(&str, semver::Version)> {
-    const PKG_EXT: &str = ".bpm.tar";
 
-    if !name.ends_with(PKG_EXT) {
+    if !name.ends_with(package::DOTTED_PKG_FILE_EXTENSION) {
         return None;
     }
 
-    let name = name.strip_suffix(PKG_EXT).unwrap();
+    let name = name.strip_suffix(package::DOTTED_PKG_FILE_EXTENSION).unwrap();
     let mut split = name.split('-');
 
     let pkg_name = split.next();

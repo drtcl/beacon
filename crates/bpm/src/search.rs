@@ -1,63 +1,70 @@
-use std::cmp::Ordering;
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+
+use anyhow::Result;
+
+use std::rc::Rc;
+use serde::{Serialize, Deserialize};
+
+pub type PackageName = String;
+pub type Version = String;
+pub type Url = String;
+pub type Filename = String;
+
+//#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq, Eq, Ord)]
+//struct Version(String);
+
+/// info for a single version
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionInfo {
+    pub url: Url,
+    pub filename: Filename,
+    pub channels: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SingleListing {
+    pub pkg_name: Rc<str>,
+    pub version: Version,
+    pub filename: Filename,
+    pub url: Url,
+    pub channels: Vec<String>,
+}
+
+pub type VersionList = BTreeMap<Version, VersionInfo>;
+pub type PackageList = BTreeMap<PackageName, VersionList>;
 
 pub trait Search {
-    fn search(&self, name: &str) -> SearchResults;
+    fn search(&self, name: &str) -> Result<PackageList>;
+    fn scan(&self) -> Result<PackageList>;
 }
 
-type PackageName = String;
-
-#[derive(Debug)]
-pub struct SearchResult {
-    pub name: String,
-    pub versions: BTreeSet<semver::Version>,
-    //pub uri: String,
-}
-
-impl PartialEq for SearchResult {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
+pub fn flatten(list: PackageList) -> Vec<SingleListing> {
+    let mut ret = Vec::new();
+    for (pkg_name, versions) in list.into_iter() {
+        let pkg_name: Rc<str> = Rc::from(pkg_name);
+        for (version, urlfn) in versions {
+            ret.push(SingleListing {
+                pkg_name: Rc::clone(&pkg_name),
+                version,
+                filename: urlfn.filename,
+                url: urlfn.url,
+                channels: urlfn.channels,
+            });
+        }
     }
+    ret
 }
 
-impl PartialOrd for SearchResult {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.name.partial_cmp(&other.name)
-    }
-}
+pub fn merge_package_lists(mut a: PackageList, b: PackageList) -> PackageList {
 
-impl Eq for SearchResult {}
+    // extend a with b, but do not overwrite values, extend the values
 
-impl Ord for SearchResult {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.name.cmp(&other.name)
-    }
-}
-
-#[derive(Debug)]
-pub struct SearchResults {
-    pub inner: BTreeMap<PackageName, SearchResult>,
-}
-
-impl SearchResults {
-    pub fn new() -> Self {
-        SearchResults {
-            inner: BTreeMap::new(),
+    for (name, versions) in b.into_iter() {
+        let vl = a.entry(name).or_default();
+        for (version, url) in versions {
+            vl.insert(version, url);
         }
     }
 
-    pub fn extend(&mut self, other: SearchResults) {
-        for pkg in other.inner.into_iter() {
-            match self.inner.entry(pkg.0) {
-                Entry::Vacant(o) => {
-                    o.insert(pkg.1);
-                }
-                Entry::Occupied(mut o) => {
-                    o.get_mut().versions.extend(pkg.1.versions);
-                }
-            }
-        }
-    }
+    a
 }

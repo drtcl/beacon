@@ -3,7 +3,7 @@ use std::io::Write;
 
 fn main() -> Result<()> {
 
-    let path = std::env::args().into_iter().skip(1).next().or(Some(".".into())).unwrap();
+    let path = std::env::args().nth(1).unwrap_or(".".into());
 
     let mut tw = tabwriter::TabWriter::new(vec![]);
     tw.write_all("path\tutil\tis_dir\tis_file\tis_symlink\tpath_is_symlink\t\n".as_bytes())?;

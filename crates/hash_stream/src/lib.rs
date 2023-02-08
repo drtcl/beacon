@@ -38,7 +38,7 @@ impl<R: Read, H: Update> Read for HashReader<R, H> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         let ret = self.read.read(buf);
         if let Ok(n) = ret {
-            self.hasher.update(&mut buf[0..n]);
+            self.hasher.update(&buf[0..n]);
         }
         ret
     }
