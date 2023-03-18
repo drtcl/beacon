@@ -81,7 +81,7 @@ impl Search for Http {
     fn search(&self, needle: &str) -> AResult<PackageList> {
         tracing::debug!("[Search] Http::search '{needle}'");
 
-        let mut pkgs = httpsearch::full_scan(None, &self.url)?;
+        let mut pkgs = httpsearch::full_scan(None, &self.url, None)?;
 
         pkgs.retain(|name, _versions| {
             name.contains(needle)
@@ -101,7 +101,7 @@ impl Search for Http {
 
     fn scan(&self) -> AResult<PackageList> {
 
-        let pkgs = httpsearch::full_scan(None, &self.url)?;
+        let pkgs = httpsearch::full_scan(None, &self.url, None)?;
 
         let mut ret = PackageList::new();
         for (name, versions) in pkgs {

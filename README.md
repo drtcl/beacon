@@ -7,7 +7,7 @@
 ---
 
 # About
-A general purpose, highly configurable, package manager for no specific language, OS, or platform.
+A general purpose, flexible, configurable, package manager for no specific language, OS, or platform.
 
 # Usage
 ## Installing a package
@@ -41,8 +41,7 @@ TODO
 
 - [x] fs
 - [x] http
-- [ ] https
-- [ ] rsync
+- [x] https
 - [ ] bpmd
 
 >Accepted directory structures:
@@ -60,23 +59,17 @@ TODO
 >            foo/
 >                foo-1.0.0.bpm
 >                foo-2.0.0.bpm
->                channels.json
+>                channels.json        (optional)
+>                channel_stable/      (optional)
+>                    foo-1.1.1.bpm
+>                    foo-2.1.1.bpm
+>                channel_beta/        (optional)
+>                    foo-1.1.0-beta.bpm
+>                    foo-2.1.0-beta.bpm
 >            bar/
 >                bar-0.1.0.bpm
->                channels.json
+>                channels.json        (optional)
 >
->    3) named and versioned -- packages in named and versioned directories
->
->        pkg/
->            foo/
->                1.0.0/
->                    foo-1.0.0.bpm
->                2.0.0/
->                    foo-2.0.0.bpm
->            bar/
->                0.1.0/
->                    bar-0.1.0.bpm
-
 
 # Configuration
 
@@ -84,8 +77,11 @@ TODO
 
 `config.toml`
 
-- cache_dir
 - database
+- cache
+  - dir
+  - retention
+  - auto_clear
 - use_default_target
 - providers
 - mount points
@@ -96,9 +92,15 @@ The config.toml file supports some basic string replacements using `${KEY}` synt
 
 For example:
 
-| config.toml: |
-| --- |
-| cache_dir = "${BPM}/cache" |
+config.toml:
+
+```
+[cache]
+dir = "${BPM}/cache"
+
+[mount]
+MAIN = "${BPM}/install/bin/${OS}/${ARCHX8664}"
+```
 
 | key | value |
 |-----|-------|
@@ -147,19 +149,28 @@ If channels are defined for a package, the channel name can be used when install
 
     bpm install foo@current
 
-The `channels.json` file defines the channels and looks something like this
+The `channels.json` file can be used to define the channels and looks something like this:
+
 ```
 {
-	"current": [
-		"1.0.0",
-		"0.9.0"
-	],
-	"beta": [
-		"2.0.0",
-	],
+    "current": [
+        "1.0.0",
+        "0.9.0"
+    ],
+    "beta": [
+        "2.0.0",
+    ],
 }
 ```
-Multiple version *can* be specific for a channel, but only the *greatest* version is ever used by bpm. Older versions can be left in the file for your own history or for information for other tools using bpm. 
+
+Packages can also just be put into channel directories. The directory name starts with `channel_`, for example: `channel_stable` in:
+
+>    pkg/
+>        foo/
+>            channel_stable/
+>                foo-1.1.1.bpm
+
+Multiple versions *can* be specified for a channel, but only the *greatest* version is ever used by bpm. Older versions can be left in the file for your own history or for information for other tools using bpm.
 
 ### Special Versions
 - [ ] TODO

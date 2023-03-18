@@ -1,4 +1,3 @@
-
 use semver::Version as SemVer;
 
 #[derive(Debug, Clone)]
@@ -59,7 +58,7 @@ impl Ord for Version {
     fn cmp(&self, rhs: &Version) -> std::cmp::Ordering {
         match (&self.semver, &rhs.semver) {
             (Some(a), Some(b)) => {
-                a.cmp(&b)
+                a.cmp(b)
             },
             _ => {
                 self.raw.cmp(&rhs.raw)

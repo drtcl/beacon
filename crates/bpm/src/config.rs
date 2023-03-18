@@ -3,15 +3,17 @@ use crate::AResult;
 use crate::provider::Provider;
 use serde_derive::Deserialize;
 use std::io::Read;
-use std::path::{PathBuf, Path};
+use std::path::Path;
+use camino::Utf8PathBuf;
 use std::fs::File;
 use std::io::BufReader;
 
 /// the main config struct
 #[derive(Debug)]
 pub struct Config {
-    pub cache_dir: PathBuf,
-    pub db_file: PathBuf,
+    pub cache_dir: Utf8PathBuf,
+    pub cache_retention: std::time::Duration,
+    pub db_file: Utf8PathBuf,
     pub providers: Vec<Provider>,
     pub mount: MountConfig,
 }
@@ -19,14 +21,14 @@ pub struct Config {
 #[derive(Debug)]
 pub struct MountConfig {
     pub use_default_target: bool,
-    pub default_target: Option<PathBuf>,
-    pub mounts: Vec<(String, PathBuf)>,
+    pub default_target: Option<Utf8PathBuf>,
+    pub mounts: Vec<(String, Utf8PathBuf)>,
 }
 
 #[derive(Debug)]
 pub enum MountPoint {
-    Specified(PathBuf),
-    Default(PathBuf),
+    Specified(Utf8PathBuf),
+    Default(Utf8PathBuf),
     DefaultDisabled,
     Invalid {
         name: String,
@@ -35,11 +37,21 @@ pub enum MountPoint {
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigToml {
-    cache_dir: String,
     database: String,
     use_default_target: bool,
     providers: toml::value::Table,
     mount: toml::value::Table,
+    cache: CacheToml,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CacheToml {
+    dir: String,
+
+    retention: String,
+
+    #[serde(default = "bool::default")]
+    auto_clear: bool,
 }
 
 impl Config {
@@ -52,17 +64,17 @@ impl Config {
             toml::from_str::<ConfigToml>(&contents).context("failed to parse config.toml")?
         };
 
-        let cache_dir = PathBuf::from(path_replace(toml.cache_dir));
-        let db_file = PathBuf::from(path_replace(toml.database));
-        //let use_default_target = toml.
+        let cache_dir = Utf8PathBuf::from(path_replace(toml.cache.dir));
+        let db_file = Utf8PathBuf::from(path_replace(toml.database));
+        let cache_retention = humantime::parse_duration(&toml.cache.retention).context("invalid cache retention")?;
 
         let mut mounts = Vec::new();
         for mount in toml.mount.into_iter() {
             match mount {
                 (name, toml::Value::String(ref val)) => {
-                    let path = PathBuf::from(path_replace(val));
+                    let path = Utf8PathBuf::from(path_replace(val));
                     if !path.exists() {
-                        eprintln!("warning: mount '{}', path '{}' does not exist", name, path.display());
+                        eprintln!("warning: mount '{}', path '{}' does not exist", name, path);
                     } else {
                         //let canon = path.canonicalize().expect("failed to canonicalize path");
                         //println!("canon {:?}", canon);
@@ -117,13 +129,13 @@ impl Config {
             db_file,
             providers,
             mount,
+            cache_retention,
         };
 
         //dbg!(&config);
 
         Ok(config)
     }
-
 
     pub fn from_path<P: AsRef<Path>>(path: P) -> AResult<Config> {
         let read = BufReader::new(File::open(path.as_ref())?);
@@ -167,6 +179,10 @@ impl Config {
 
 /// replace variables within a path
 /// - `${BPM}` => dir of bpm binary
+/// - `${THIS}` => dir of the config file
+/// - `${OS}` => "linux", "windows", "wasm", "unix", "unknown"
+/// - `${ARCH3264}` => "64" or "32"
+/// - `${ARCHX8664}` => "x86" or "x86_64"
 fn path_replace<S: Into<String>>(path: S) -> String {
 
     let mut path = path.into();
@@ -176,6 +192,10 @@ fn path_replace<S: Into<String>>(path: S) -> String {
         let exe_dir = cur_exe.parent().unwrap().to_str().unwrap();
         path = path.replace("${BPM}", exe_dir);
     }
+
+    //if path.contains("${THIS}") {
+        //todo!("NYI");
+    //}
 
     if path.contains("${OS}") {
 

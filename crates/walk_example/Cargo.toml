@@ -6,9 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.71"
-tabwriter = "1.2.1"
-walkdir = "2.3.3"
+anyhow = { workspace = true }
+tabwriter = { workspace = true }
+walkdir = { workspace = true }
 
 [features]
 default = ["color"]

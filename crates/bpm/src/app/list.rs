@@ -9,12 +9,17 @@ impl App {
     pub fn list_cmd(&mut self, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some(("available", sub_matches)) => {
-                self.list_available_cmd()?;
+                let exact = *sub_matches.get_one::<bool>("exact").unwrap();
+                let json = *sub_matches.get_one::<bool>("json").unwrap();
+                let name = sub_matches.get_one::<String>("pkg");
+                let provider_filter = args::parse_providers(sub_matches);
+                self.list_available_cmd(name, exact, json, provider_filter)?;
             }
             Some(("channels", sub_matches)) => {
-                self.list_channels_cmd()?;
+                let provider_filter = args::parse_providers(sub_matches);
+                self.list_channels_cmd(provider_filter)?;
             }
-            Some(("installed", sub_matches)) => {
+            Some(("installed", _sub_matches)) => {
                 self.list_installed()?;
             }
             Some(_) => unreachable!(),
@@ -48,11 +53,12 @@ impl App {
     }
 
     /// list channels for a given package, or all packages
-    pub fn list_channels_cmd(&mut self) -> Result<()> {
+    pub fn list_channels_cmd(&mut self, provider_filter: provider::ProviderFilter) -> Result<()> {
+
         let mut combined = search::PackageList::new();
-        for provider in &self.config.providers {
-            if let Ok(cache) = provider.load_cache() {
-                combined = search::merge_package_lists(combined, cache);
+        for provider in provider_filter.filter(&self.config.providers) {
+            if let Ok(data) = provider.load_file() {
+                combined = search::merge_package_lists(combined, data.packages);
             }
         }
 
@@ -73,41 +79,87 @@ impl App {
             for channel in channels {
                 write!(&mut stdout, " {}", channel)?;
             }
-            write!(&mut stdout, "\n")?;
+            writeln!(&mut stdout)?;
         }
         Ok(())
     }
 
     /// list all versions of all packages that are available
-    pub fn list_available_cmd(&mut self) -> Result<()> {
+    pub fn list_available_cmd(&mut self, needle: Option<&String>, exact: bool, json: bool, provider_filter: provider::ProviderFilter) -> Result<()> {
 
         let mut combined = search::PackageList::new();
-        for provider in &self.config.providers {
-            if let Ok(cache) = provider.load_cache() {
-                combined = search::merge_package_lists(combined, cache);
+        for provider in provider_filter.filter(&self.config.providers) {
+            if let Ok(data) = provider.load_file() {
+                combined = search::merge_package_lists(combined, data.packages);
             }
         }
 
-        let mut stdout = std::io::stdout();
+        if json {
 
-        let mut sorted = Vec::new();
+            //let js = serde_json::json!(combined);
+            //println!("{}", js);
 
-        for (name, versions) in &combined {
+            for (name, versions) in combined {
 
-            versions.keys().map(|v| version_compare::Version::from(v).unwrap()).collect_into(&mut sorted);
-            sorted.sort_by(|a, b| a.compare(b).ord().unwrap_or(a.as_str().cmp(b.as_str())));
+                // skip any that do not match the required name
+                if let Some(needle) = needle && ((exact && &name != needle) || (!exact && !name.contains(needle))) {
+                    continue;
+                }
 
-            write!(&mut stdout, "{}", name)?;
-            for version in &sorted {
-                if let Some(version_info) = versions.get(version.as_str()) {
-                    write!(&mut stdout, " {}", version.as_str())?;
-                    for channel in &version_info.channels {
-                        write!(&mut stdout, " +{}", channel)?;
+                let mut sorted = Vec::new();
+                versions.keys().map(|v| version_compare::Version::from(v).unwrap()).collect_into(&mut sorted);
+                sorted.sort_by(|a, b| a.compare(b).ord().unwrap_or(a.as_str().cmp(b.as_str())));
+                sorted.reverse();
+
+                let mut json_versions = Vec::new();
+
+                for version in &sorted {
+                    if let Some(version_info) = versions.get(version.as_str()) {
+                        let mut json_channels = Vec::new();
+                        for channel in &version_info.channels {
+                            json_channels.push(channel.to_string());
+                        }
+
+                        json_versions.push(serde_json::json!((version.to_string(), json_channels)));
                     }
                 }
+
+                sorted.clear();
+
+                let js = serde_json::json!({
+                    "package": name,
+                    "versions": json_versions,
+                });
+                println!("{}", js);
             }
-            write!(&mut stdout, "\n")?;
-            sorted.clear();
+
+        } else {
+            let mut stdout = std::io::stdout();
+            let mut sorted = Vec::new();
+
+            for (name, versions) in &combined {
+
+                // skip any that do not match the required name
+                if let Some(needle) = needle && ((exact && name != needle) || (!exact && !name.contains(needle))) {
+                    continue;
+                }
+
+                versions.keys().map(|v| version_compare::Version::from(v).unwrap()).collect_into(&mut sorted);
+                sorted.sort_by(|a, b| a.compare(b).ord().unwrap_or(a.as_str().cmp(b.as_str())));
+
+                write!(&mut stdout, "{}", name)?;
+                for version in &sorted {
+                    if let Some(version_info) = versions.get(version.as_str()) {
+                        write!(&mut stdout, " {}", version.as_str())?;
+                        for channel in &version_info.channels {
+                            write!(&mut stdout, " +{}", channel)?;
+                        }
+                    }
+                }
+
+                writeln!(&mut stdout)?;
+                sorted.clear();
+            }
         }
 
         //for (name, versions) in &combined {

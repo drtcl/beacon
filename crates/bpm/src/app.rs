@@ -1,8 +1,15 @@
 use crate::*;
 use std::io::BufWriter;
 use std::io::IsTerminal;
+use chrono::SubsecRound;
 use package::PackageID;
 use std::fs::File;
+use std::io::Seek;
+use std::io::Read;
+use std::collections::HashSet;
+use std::collections::BTreeMap;
+
+use bpmutil::*;
 
 mod list;
 
@@ -10,6 +17,7 @@ mod list;
 pub struct App {
     pub config: config::Config,
     pub db: db::Db,
+    pub db_loaded: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -19,8 +27,31 @@ pub struct Versioning {
     pub channel: Option<String>,
 }
 
+impl Versioning {
+    fn pinned_version() -> Self {
+        Self {
+            pinned_to_version: true,
+            pinned_to_channel: false,
+            channel: None,
+        }
+    }
+    fn pinned_channel(chan: &str) -> Self {
+        Self {
+            pinned_to_version: false,
+            pinned_to_channel: true,
+            channel: Some(chan.to_string())
+        }
+    }
+}
+
 impl App {
     pub fn load_db(&mut self) -> AResult<()> {
+
+        if self.db_loaded {
+            tracing::trace!("database already loaded");
+            return Ok(())
+        }
+
         tracing::trace!("loading database");
 
         if !self.config.db_file.exists() {
@@ -50,8 +81,9 @@ impl App {
 
     pub fn save_db(&self) -> AResult<()> {
         tracing::trace!("saving database");
+        // write to a temp file first, then move the tempfile over the existing dbfile
         let mut path = self.config.db_file.clone();
-        let ext = path.extension().map_or("tmp".into(), |e| format!("{}.tmp", e.to_string_lossy()));
+        let ext = path.extension().map_or("tmp".into(), |e| format!("{}.tmp", e));
         path.set_extension(ext);
         let mut file = BufWriter::new(File::create(&path)?);
         self.db.write_to(&mut file)?;
@@ -86,7 +118,9 @@ impl App {
         for provider in &self.config.providers {
 
             // load the provider's cache file and merge it's results
-            if let Ok(mut cached_results) = provider.load_cache() {
+            if let Ok(data) = provider.load_file() {
+
+                let mut cached_results = data.packages;
 
                 cached_results.retain(|name, _versions| {
                     if exact {
@@ -104,57 +138,7 @@ impl App {
         Ok(merged_results)
     }
 
-    fn get_cached_package_path(&self, id: &PackageID) -> Option<PathBuf> {
-
-        for entry in walkdir::WalkDir::new(&self.config.cache_dir) {
-            if let Ok(entry) = entry {
-                let filename = entry.file_name().to_string_lossy();
-                if package::filename_match(&filename, id) {
-                    tracing::trace!("found cached package file {}", filename);
-                    return Some(entry.into_path());
-                }
-            }
-        }
-        tracing::trace!("package file not found in cache");
-        None
-    }
-
-    /// fetch a package by name AND version
-    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<PathBuf> {
-
-        tracing::debug!(pkg=id.name, version=id.version, "cache fetch");
-
-        // ensure that we have the cache/packages dir
-        std::fs::create_dir_all(join_path!(&self.config.cache_dir, "packages")).context("failed to create cache/packages dir")?;
-
-        let temp_path = join_path!(&self.config.cache_dir, "temp.download");
-        let mut file = File::create(&temp_path)?;
-
-        for provider in &self.config.providers {
-            if let Ok(packages) = provider.load_cache() {
-                if let Some(versions) = packages.get(&id.name) {
-                    if let Some(x) = versions.get(&id.version) {
-                        dbg!(x);
-
-                        let final_path = join_path!(&self.config.cache_dir, "packages", &x.filename);
-
-                        let result = provider.as_provide().fetch(&mut file, &id, &x.url);
-                        if result.is_ok() {
-                            file.sync_all()?;
-                            drop(file);
-                            tracing::trace!("moving fetched package file from {} to {}", temp_path.display(), final_path.display());
-                            std::fs::rename(&temp_path, &final_path).context("failed to move file")?;
-                            return Ok(final_path);
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(anyhow::anyhow!("failed to fetch package"))
-    }
-
-    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<PathBuf> {
+    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<Utf8PathBuf> {
         let pkg_mount_point = metadata.mount.as_deref();
         let mount_point = self.config.get_mountpoint(pkg_mount_point);
         match mount_point {
@@ -166,19 +150,16 @@ impl App {
     }
 
     /// install a package from a local package file.
-    fn install_pkg_file(&mut self, file_path: PathBuf, versioning: Versioning) -> AResult<()> {
+    fn install_pkg_file(&mut self, file_path: Utf8PathBuf, versioning: Versioning) -> AResult<()> {
 
-        tracing::debug!("install_pkg_file {}", file_path.display());
+        tracing::debug!("install_pkg_file {}", file_path);
 
-        let file_name = file_path
-            .file_name().context("invalid filename")?
-            .to_str().context("invalid filename")?;
-
-        //dbg!(file_name);
+        let package_file_filename = file_path
+            .file_name().context("invalid filename")?;
 
         let pkg_name;
         let pkg_version;
-        match pkg::name_parts(file_name) {
+        match pkg::name_parts(package_file_filename) {
             Some((n, v)) => {
                 pkg_name = n;
                 pkg_version = v;
@@ -188,9 +169,14 @@ impl App {
             }
         }
 
-        // open the file
-        let mut file = File::open(&file_path).context("failed to open cached package file")?;
-        let metadata = package::get_metadata(&mut file)?;
+        // open the package file and get the metadata
+        let mut file = File::open(&file_path).context("failed to open package file")?;
+        let metadata = package::get_metadata(&mut file).context("error reading metadata")?;
+
+        // make sure the checksum matches
+        if !package::package_integrity_check(&mut file)? {
+            anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
+        }
 
         // package filename must match package metadata
         // name must match
@@ -200,11 +186,6 @@ impl App {
         // version must match
         if metadata.version != pkg_version.to_string() {
             anyhow::bail!("failed to installed {}, package file is corrupt. Package version does not match package metadata.", pkg_name);
-        }
-
-        // make sure the checksum matches
-        if !pkg::check_datachecksum(&metadata, &mut file)? {
-            anyhow::bail!("failed to installed {}, package file is corrupt. Package checksum mismatch", pkg_name);
         }
 
         let install_dir = self.get_mountpoint_dir(&metadata)?;
@@ -220,37 +201,19 @@ impl App {
 
         // obtain reader for embeded data archive
         file.rewind()?;
-        let mut tar = tar::Archive::new(&mut file);
-        //let mut data_tar = pkg::seek_to_tar_entry("data.tar.zst", &mut tar)?;
-        let mut data_tar = package::seek_to_tar_entry("data.tar.zst", &mut tar)?;
-        let mut zstd = zstd::stream::read::Decoder::new(&mut data_tar)?;
+        let mut outer_tar = tar::Archive::new(&mut file);
+        let mut inner_tar = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
+        let mut zstd = zstd::stream::read::Decoder::new(&mut inner_tar)?;
         let mut data_tar = tar::Archive::new(&mut zstd);
 
-        // unpack all files
-        //data_tar.unpack(install_dir)?;
-
-        //let mut file_list = Vec::new();
-
-        //TODO check that the tar only unpacks files listed in metadata.files
-
-        // unpack individual files
+        // unpack all files individually
         for entry in data_tar.entries()? {
             let mut entry = entry?;
             let installed = entry.unpack_in(&install_dir)?;
             //println!("unpacked entry {:?} {}", entry.path(), installed);
-            //file_list.push(entry.path()?.into_owned());
 
-            // TODO can this exit cleaner?
-            // failed to install a file, exit
             if !installed {
-                match entry.path() {
-                    Ok(path) => {
-                        anyhow::bail!("failed to install file {:?}", path);
-                    }
-                    Err(_) => {
-                        anyhow::bail!("failed to install file");
-                    }
-                }
+                tracing::error!("unpack skipped {:?}", entry.path());
             }
         }
 
@@ -259,15 +222,15 @@ impl App {
         //    version: pkg_version.to_string(),
         //});
 
-        //for (k, v) in files.into_iter() {
-        //    details.files.push((k, v));
-        //}
-
         let mut details = db::DbPkg::new(metadata);
         details.location = install_dir.into();
         details.versioning = versioning;
+        details.package_file_filename = Some(package_file_filename.to_string());
 
         self.db.add_package(details);
+
+        self.db.cache_touch(package_file_filename);
+        self.db.cache_set_in_use(package_file_filename, true);
         self.save_db()?;
 
         Ok(())
@@ -335,7 +298,8 @@ impl App {
     }
 
     /// subcommand for installing a package
-    pub fn install_cmd(&mut self, pkg_name: &String) -> AResult<()> {
+    pub fn install_cmd(&mut self, pkg_name: &String, no_pin: bool) -> AResult<()> {
+
         self.create_load_db()?;
 
         // make sure we have a cache dir to save the package in
@@ -343,23 +307,23 @@ impl App {
 
         // installing from a package file
         {
-            let path = Path::new(pkg_name);
-            let filename = path.file_name().map(|s| s.to_string_lossy().to_string());
-            if let Ok(true) = path.try_exists() && let Some(filename) = filename && package::is_packagefile_name(&filename) {
+            let path = Utf8Path::new(pkg_name);
+            let filename = path.file_name();
+            if let Ok(true) = path.try_exists() && let Some(filename) = filename && package::is_packagefile_name(filename) {
 
-                tracing::trace!("installing from package file {pkg_name}");
+                tracing::trace!("installing directly from a package file {pkg_name}");
 
                 // TODO check that the package file is not a path to a file in the cache dir
                 // (DO NOT COPY IN PLACE)
 
-                let cache_path = join_path!(&self.config.cache_dir, filename);
+                let cache_path = join_path_utf8!(&self.config.cache_dir, filename);
 
                 // copy to the cache dir
                 std::fs::copy(path, &cache_path).context("failed to copy package file")?;
 
                 //TODO sanity check file contents
 
-                return self.install_pkg_file(cache_path, Versioning::default());
+                return self.install_pkg_file(cache_path, Versioning::pinned_version());
             }
         }
 
@@ -374,11 +338,16 @@ impl App {
             Some(name) => name,
         };
 
-        let (listing, versioning) = self.find_package_version(pkg_name, split.next())?;
+        let (listing, mut versioning) = self.find_package_version(pkg_name, split.next())?;
         let version = Version::new(&listing.version);
+
+        if no_pin {
+            versioning.pinned_to_version = false;
+        }
 
         //dbg!(&listing);
         //dbg!(&versioning);
+        //dbg!(&no_pin);
         //dbg!(&version);
 
         tracing::debug!(pkg_name, version=version.as_str(), "installing from provider");
@@ -388,80 +357,10 @@ impl App {
             version: version.to_string(),
         };
 
-        let cached_file = if let Some(cached_file) = self.get_cached_package_path(&id) {
-            cached_file
-        } else {
-            let cached_file = self.cache_fetch_cmd(&id)?;
-            cached_file
-        };
+        let cached_file = self.cache_package_require(&id)?;
 
         tracing::debug!("installing {pkg_name} {version}");
         return self.install_pkg_file(cached_file, versioning);
-    }
-
-    /// verify package state
-    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>) -> AResult<()>
-        where S: AsRef<str>,
-    {
-        // for installed packages listed in the db,
-        // walk each file and hash the version we have on disk
-        // and compare to the hash stored in the db
-        self.load_db()?;
-
-        // all given names must be installed
-        for name in pkgs {
-            let find = self.db.installed.iter().find(|&ent| ent.metadata.name == name.as_ref());
-            if find.is_none() {
-                anyhow::bail!("package named '{}' is not installed", name.as_ref());
-            }
-        }
-
-        let filtering = !pkgs.is_empty();
-        let iter = self.db.installed.iter().filter(|&ent| {
-            if filtering {
-                pkgs.iter().any(|name| name.as_ref() == ent.metadata.name)
-            } else {
-                true
-            }
-        });
-
-        for pkg in iter {
-            println!("verifying package {}", pkg.metadata.name);
-
-            let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
-            for (filepath, fileinfo) in pkg.metadata.files.iter() {
-
-                if !fileinfo.filetype.is_file() {
-                    println!("skipping non-file {}", filepath);
-                    continue;
-                }
-
-                let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
-
-                let path = join_path!(&root_dir, filepath);
-
-                println!("checking file at {path:?} for hash {db_hash}");
-
-                if !path.exists() {
-                    println!("bad -- {:?} does not exist", &path);
-                    continue;
-                }
-
-                let file = File::open(&path)?;
-                let reader = std::io::BufReader::new(file);
-                let hash = pkg::blake2_hash_reader(reader)?;
-
-                if &hash == db_hash {
-                    println!("ok  -- {:?}", &path);
-                } else {
-                    println!("bad --{:?}", &path);
-                }
-
-                // TODO could put progress bars in here
-            }
-        }
-
-        Ok(())
     }
 
     /// uninstall a package
@@ -473,87 +372,767 @@ impl App {
 
         let found = self.db.installed.iter().find(|e| &e.metadata.name == pkg_name);
 
-        let pkg = match found {
-            None => {
-                println!("package '{pkg_name}' not installed");
-                std::process::exit(0);
-                //anyhow::bail!("package '{pkg_name}' not installed"),
-            }
-            Some(pkg) => pkg,
-        };
+        if found.is_none() {
+            println!("package '{pkg_name}' not installed");
+            std::process::exit(0);
+            //anyhow::bail!("package '{pkg_name}' not installed"),
+        }
+
+        let pkg = found.unwrap();
+        let package_file_filename = pkg.package_file_filename.clone();
 
         self.delete_package_files(pkg)?;
         self.db.remove_package(pkg.metadata.id());
+        if let Some(filename) = package_file_filename {
+            self.db.cache_touch(&filename);
+            self.db.cache_set_in_use(&filename, false);
+        }
         self.save_db()?;
         Ok(())
     }
 
-    fn delete_package_files(&self, pkg: &db::DbPkg) -> AResult<()> {
+    fn update_inplace(&mut self, pkg_name: String, new_pkg_file: Utf8PathBuf, versioning: Versioning) -> AResult<()> {
 
-        //dbg!(pkg);
+        let cache_file = &new_pkg_file;
+        tracing::trace!("update_inplace {cache_file:?}");
 
-        // TODO actually delete the files
+        // gather info about the old package (the currently installed version)
+        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently intalled")?;
+        //dbg!(&current_pkg_info);
+        let mut old_files = current_pkg_info.metadata.files.clone();
+        //dbg!(old_files.keys());
+
+        let mut new_package_fd = std::fs::File::open(cache_file)?;
+        let metadata = package::get_metadata(&mut new_package_fd)?;
+
+        // make sure the checksum matches
+        if !package::package_integrity_check(&mut new_package_fd)? {
+            anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
+        } else {
+            //tracing::trace!
+        }
+
+        let new_files = metadata.files.clone();
+        dbg!(&new_files.keys());
+
+        // old_files -= new_files
+        for (path, new_file) in &new_files {
+            let old_file = old_files.get(path);
+            if let Some(old_file) = old_file {
+                if old_file.filetype != new_file.filetype {
+                } else {
+                    // same path and type, can keep it around
+                    old_files.remove_entry(path);
+                }
+            }
+        }
+
+        // these are the files to remove
+        let remove_files = old_files;
+        //dbg!(remove_files.keys());
+
+        let iter = remove_files.iter().map(|(path, info)| {
+            let path = build_pkg_file_path(current_pkg_info, &path).unwrap();
+            (path, info)
+        });
+
+        let delete_ok = Self::delete_files(iter);
+        if let Err(e) = delete_ok {
+            eprintln!("error deleting files {:?}", e);
+        }
+
+        let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
+        println!("installing to the same location {}", location);
+
+        let mut skip_files = HashSet::new();
+
+        for (path, info) in &new_files {
+            // if already exists, check hash
+            let fullpath = join_path_utf8!(&location, &path);
+            if let Ok(true) = fullpath.try_exists() {
+                if !info.filetype.is_dir() {
+                    println!("getting hash for {}", fullpath);
+                    let mut file = File::open(&fullpath)?;
+                    let hash = blake3_hash_reader(&mut file)?;
+
+                    if Some(&hash) == info.hash.as_ref() {
+                        // this file can be skipped during update
+                        skip_files.insert(path);
+                    } else {
+                        // overwrite this file
+                        println!("{} != {}", &hash, info.hash.as_ref().unwrap());
+                        println!("this file must be re-installed");
+                    }
+                }
+            }
+        }
+
+        println!("skip files {:?}", skip_files);
+
+        new_package_fd.rewind()?;
+        let mut outer_tar = tar::Archive::new(&mut new_package_fd);
+        let mut inner_tar = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
+        let mut zstd = zstd::stream::read::Decoder::new(&mut inner_tar)?;
+        let mut data_tar = tar::Archive::new(&mut zstd);
+
+        for entry in data_tar.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?;
+            //dbg!(&path);
+            //let x = path.as_ref().to_string_lossy().to_string(); //TODO dd
+            let path = Utf8PathBuf::from(&path.to_string_lossy());
+            if skip_files.remove(&path) {
+                tracing::trace!("skipping   {}", path);
+            } else {
+                tracing::trace!("updating   {}", path);
+                let _ok = entry.unpack_in(&location);
+                //dbg!(_ok);
+            }
+        }
+
+        let mut details = db::DbPkg::new(metadata);
+        details.location = Some(location);
+        details.versioning = versioning;
+        let pkg_filename = new_pkg_file.file_name().map(str::to_string);
+        details.package_file_filename = pkg_filename;
+
+        //dbg!(&details);
+        self.db.add_package(details);
+
+        //self.db.cache_touch(&new_pkg_file);
+        //self.db.cache_set_in_use(package_file_filename, true);
+
+        self.save_db()?;
+
+        Ok(())
+    }
+
+    pub fn update_packages_cmd(&mut self, pkgs: &[&String]) -> AResult<()> {
+
+        self.load_db()?;
+
+        // determine which packages need to be updated
+        let mut updates = Vec::new();
+
+        for pkg in &self.db.installed {
+
+            // skip pkgs that are not listed at the cli
+            if !pkgs.is_empty() && !pkgs.contains(&&pkg.metadata.name) {
+                continue;
+            }
+
+            if pkg.versioning.pinned_to_version {
+                println!("{} is pinned to {}, skipping", pkg.metadata.name, pkg.metadata.version);
+                continue;
+            }
+
+            println!("{}: current version {}", pkg.metadata.name, pkg.metadata.version);
+
+            // updates stay on a channel?
+            let mut channel = None;
+            if pkg.versioning.pinned_to_channel {
+                if let Some(c) = &pkg.versioning.channel {
+                    channel = Some(c.clone());
+                }
+            }
+
+            let result = self.find_package_version(&pkg.metadata.name, channel.as_deref());
+
+            if let Ok((listing, versioning)) = result {
+                //dbg!(&listing);
+                //dbg!(&versioning);
+                let version = listing.version;
+                println!("{}: updating to {}", pkg.metadata.name, version);
+
+                let cached_file = self.cache_package_require(&PackageID{
+                    name: pkg.metadata.name.clone(),
+                    version: version.to_string(),
+                });
+
+                if cached_file.is_err() {
+                    println!("failed to cache fetch {} {}", pkg.metadata.name, version);
+                    continue;
+                }
+
+                let cached_file = cached_file.unwrap();
+                dbg!(&cached_file);
+                //self.update_inplace(&pkg, cached_file)?;
+                updates.push((pkg.metadata.name.clone(), pkg.metadata.version.clone(), version, versioning, cached_file));
+            }
+        }
+
+        println!("updates to apply:");
+        for (name, oldv, newv, _versioning, _pkgfile) in &updates {
+            println!("{} : {} -> {}", name, oldv, newv);
+        }
+
+        //TODO can put confirmation prompt here
+
+        dbg!(&updates);
+        for (pkg_name, _oldv, _newv, versioning, new_pkg_file) in updates {
+            dbg!(&pkg_name);
+            dbg!(&new_pkg_file);
+            let _ok = self.update_inplace(pkg_name, new_pkg_file, versioning)?;
+            dbg!(_ok);
+        }
+
+        Ok(())
+    }
+
+    /// Verify package state.
+    ///
+    /// For installed packages listed in the db,
+    /// walk each file and hash the version we have on disk
+    /// and compare that to the hash stored in the db.
+    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, verbose: bool) -> AResult<()>
+        where S: AsRef<str>,
+    {
+
+        self.load_db()?;
+
+        // all given names must be installed
+        for name in pkgs {
+            let find = self.db.installed.iter().find(|&ent| ent.metadata.name == name.as_ref());
+            if find.is_none() {
+                anyhow::bail!("package named '{}' is not installed", name.as_ref());
+            }
+        }
+
+        let filtering = !pkgs.is_empty();
+        let db_iter = self.db.installed.iter().filter(|&ent| {
+            if filtering {
+                pkgs.iter().any(|name| name.as_ref() == ent.metadata.name)
+            } else {
+                true
+            }
+        });
+
+        // TODO could put progress bars in here
+
+        for pkg in db_iter {
+
+            let mut pristine = true;
+            vout!(verbose, "# verifying package {}", pkg.metadata.name);
+
+            let mut restore_files = HashSet::new();
+
+            let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
+            for (filepath, fileinfo) in pkg.metadata.files.iter() {
+
+                if !fileinfo.filetype.is_file() {
+                    //vout!(verbose, "skipping non-file {}", filepath);
+                    continue;
+                }
+
+                let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
+
+                let path = join_path!(&root_dir, filepath);
+
+                //vout!(verbose, "checking file at {path:?} for hash {db_hash}");
+
+                if !path.exists() {
+                    if restore {
+                        //vout!(verbose, "rD  -- {}", &filepath);
+                        restore_files.insert(filepath.clone());
+                    } else {
+                        vout!(verbose, " D  -- {}", &filepath);
+                    }
+                    continue;
+                }
+
+                let file = File::open(&path)?;
+                let reader = std::io::BufReader::new(file);
+                let hash = blake3_hash_reader(reader)?;
+
+                if &hash == db_hash {
+                    vout!(verbose, "    -- {}", &filepath);
+                } else {
+                    pristine = false;
+                    if restore {
+                        //println!("rM  -- {}", &filepath);
+                        restore_files.insert(filepath.clone());
+                    } else {
+                        //vout!(verbose, " M  -- {}", &filepath);
+                        println!(" M  -- {}", &filepath);
+                    }
+                }
+
+            }
+
+            if restore {
+                //println!("restore_files {:?}", restore_files);
+
+                let path = self.cache_package_require(&PackageID{
+                    name: pkg.metadata.name.clone(),
+                    version: pkg.metadata.version.clone(),
+                }).context("could not find package file")?;
+                let cache_file = std::fs::File::open(path)?;
+
+                let mut outer_tar = tar::Archive::new(&cache_file);
+                let mut data_file = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut outer_tar)?;
+                let mut zstd = zstd::Decoder::new(&mut data_file)?;
+                let mut data_tar = tar::Archive::new(&mut zstd);
+
+                for ent in data_tar.entries()? {
+                    let mut ent = ent.context("error reading tar")?;
+                    let path = Utf8PathBuf::from(&ent.path()?.to_string_lossy());
+                    let full_path = build_pkg_file_path(pkg, &path)?;
+                    if let Some(xpath) = restore_files.take(&path) {
+                        let _ok = ent.unpack(full_path);
+                        //dbg!(_ok);
+                        println!(" R  -- {}", xpath);
+                    }
+
+                    // when there are no more files to restore, stop iterating the package
+                    if restore_files.is_empty() {
+                        break;
+                    }
+                }
+            }
+
+            println!("> {} -- {}", pkg.metadata.name, tern!(pristine, "OK", "MODIFIED"));
+        }
+
+        Ok(())
+    }
+
+    fn delete_files<'a, I, P>(files: I) -> AResult<()>
+        where
+            P : std::fmt::Debug + AsRef<Utf8Path>,
+            I : Iterator<Item=(P, &'a package::FileInfo)>,
+    {
 
         let mut dirs = Vec::new();
 
-        for (filepath, fileinfo) in &pkg.metadata.files {
-            //println!("removing {filepath}");
-            //dbg!(fileinfo);
+        for (filepath, fileinfo) in files {
+            //let path = PathBuf::from(filepath.as_ref());
+
+            let filepath = filepath.as_ref();
+            let exists = matches!(filepath.try_exists(), Ok(true));
+
             match &fileinfo.filetype {
                 package::FileType::Link(to) => {
-                    let path = get_pkg_file_path(pkg, filepath)?;
-                    println!("removing {filepath} -> {to}");
-                    println!("         {}", path.display());
-                    std::fs::remove_file(path)?;
+                    //let path = build_pkg_file_path(pkg, filepath)?;
+                    println!("removing {filepath:?} -> {to}");
+                    //println!("         {}", path.display());
+                    let e = std::fs::remove_file(filepath);
+                    if let Err(e) = e && exists {
+                        eprintln!("error deleting {}", filepath);
+                    }
                 }
                 package::FileType::File => {
-                    let path = get_pkg_file_path(pkg, filepath)?;
-                    println!("removing {filepath}");
-                    println!("         {}", path.display());
-                    std::fs::remove_file(path)?;
+                    //let path = build_pkg_file_path(pkg, filepath)?;
+                    println!("removing {filepath:?}");
+                    //println!("         {}", path.display());
+                    let e = std::fs::remove_file(filepath);
+                    if let Err(e) = e && exists {
+                        eprintln!("error deleting {}", filepath);
+                    }
                 }
                 package::FileType::Dir => {
-                    let path = get_pkg_file_path(pkg, filepath)?;
-                    dirs.push(path);
+                    //let path = build_pkg_file_path(pkg, filepath)?;
+                    //dirs.push(path);
+                    dirs.push(filepath.to_path_buf());
                 }
             }
         }
 
         dirs.reverse();
         for path in dirs {
-            println!("removing dir {}", path.display());
-            std::fs::remove_dir(path)?;
+            println!("removing dir {path:?}");
+
+            let exists = matches!(path.try_exists(), Ok(true));
+            let e = std::fs::remove_dir(&path);
+            if let Err(e) = e && exists {
+                eprintln!("error deleting {}", path);
+            }
         }
 
         Ok(())
     }
 
-    pub fn scan_cmd(&self) -> AResult<()> {
+    fn delete_package_files(&self, pkg: &db::DbPkg) -> AResult<()> {
+
+        let location = pkg.location.as_ref().context("package has no install location")?;
+
+        let iter = pkg.metadata.files.iter().map(|(path, info)| {
+            let path = join_path_utf8!(&location, path);
+            (path, info)
+        });
+
+        Self::delete_files(iter)
+
+//        //dbg!(pkg);
+//
+//        let mut dirs = Vec::new();
+//
+//        for (filepath, fileinfo) in &pkg.metadata.files {
+//            //println!("removing {filepath}");
+//            //dbg!(fileinfo);
+//            match &fileinfo.filetype {
+//                package::FileType::Link(to) => {
+//                    let path = build_pkg_file_path(pkg, filepath)?;
+//                    println!("removing {filepath} -> {to}");
+//                    println!("         {}", path.display());
+//                    std::fs::remove_file(path)?;
+//                }
+//                package::FileType::File => {
+//                    let path = build_pkg_file_path(pkg, filepath)?;
+//                    println!("removing {filepath}");
+//                    println!("         {}", path.display());
+//                    std::fs::remove_file(path)?;
+//                }
+//                package::FileType::Dir => {
+//                    let path = build_pkg_file_path(pkg, filepath)?;
+//                    dirs.push(path);
+//                }
+//            }
+//        }
+//
+//        dirs.reverse();
+//        for path in dirs {
+//            println!("removing dir {}", path.display());
+//            std::fs::remove_dir(path)?;
+//        }
+//
+//        Ok(())
+    }
+
+    /// `bpm query owner <file>`
+    pub fn query_owner(&mut self, file: &str) -> AResult<()> {
+
+        // canonicalize the first existing parent path
+        let partial_canonicalize = |path: &Utf8Path| {
+            for parent in path.ancestors().skip(1) {
+                //println!("ancestor {} exists {:?}", parent, parent.try_exists());
+                if let Ok(true) = parent.try_exists() {
+                    let rest = path.strip_prefix(parent);
+                    let parent = parent.canonicalize_utf8();
+                    //println!("  !! {:?}", parent);
+                    //println!("  rest {:?}", rest);
+                    if let (Ok(parent), Ok(rest)) = (parent, rest) {
+                        return join_path_utf8!(parent, rest);
+                    }
+                    break;
+                }
+            }
+            return path.to_path_buf();
+        };
+
+        let mut needle = Utf8PathBuf::from(file);
+
+        if needle.is_relative() {
+            let cwd = std::env::current_dir()?;
+            let cwd = Utf8PathBuf::from_path_buf(cwd).expect("failed to get cwd");
+            needle = join_path_utf8!(cwd, needle);
+        }
+
+        needle = partial_canonicalize(&needle);
+
+        tracing::trace!("query_owner converted path from {} to {}", file, needle);
+
+        self.load_db()?;
+        for pkg in &self.db.installed {
+
+            if let Some(pkg_loc) = pkg.location.as_ref().and_then(|p| p.canonicalize_utf8().ok()) {
+                //println!("checking package {}", &pkg.metadata.name);
+                //println!("install location: {}", pkg_loc);
+                if needle.starts_with(&pkg_loc) {
+                    //println!("could be in this package");
+                    for path in pkg.metadata.files.keys() {
+                        let full_path = pkg_loc.join(path);
+                        //println!("{:30} {}", path, full_path);
+                        if full_path == needle {
+                            println!("{} {}", &pkg.metadata.name, &pkg.metadata.version);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    //println!("not in this package");
+                    continue;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// `bpm query list-files <pkg>`
+    pub fn query_files(&mut self, pkg_name: &str, depth: Option<u32>, absolute: bool, show_type: bool) -> AResult<()> {
+
+        let depth = depth.unwrap_or(0);
+
+        let output = |root: &Utf8Path, path: &Utf8Path, info: &package::FileInfo| {
+            if show_type {
+                let c = match &info.filetype {
+                    package::FileType::Dir => 'd',
+                    package::FileType::File => 'f',
+                    package::FileType::Link(to) => 's',
+                };
+                print!("{c} ");
+            }
+            if absolute {
+                let path = root.join(path);
+                println!("{}", path);
+            } else {
+                println!("{}", path);
+            }
+        };
+
+        self.load_db()?;
+        for pkg in &self.db.installed {
+            if pkg.metadata.name == pkg_name {
+
+                let root = pkg.location.as_ref().expect("package doesn't have an install location");
+                let root = root.canonicalize_utf8()?;
+
+                for (path, info) in &pkg.metadata.files {
+                    if depth > 0 {
+                        let count = path.components().count();
+                        if count <= depth as usize {
+                            output(&root, path, info);
+                        }
+                    } else {
+                        output(&root, path, info);
+                    }
+                }
+
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("package not installed")
+    }
+
+    pub fn scan_cmd(&self, provider_filter: provider::ProviderFilter, debounce: std::time::Duration) -> AResult<()> {
 
         tracing::trace!("scanning providers");
+
+        let now = chrono::Utc::now().round_subsecs(0);
+        tracing::trace!("now                {:?}", now);
+
+        let mut skip_scan = true;
+
+        if debounce.is_zero() {
+            skip_scan = false;
+        } else {
+            // if any provider needs scanning, scan all
+            for provider in provider_filter.filter(&self.config.providers) {
+                if let Ok(data) = provider.load_file() {
+                    let debounce_timepoint = data.scan_time + debounce;
+                    if debounce_timepoint < now {
+                        skip_scan = false;
+                    }
+                    tracing::trace!("{:-18} {:?}", &provider.name, data.scan_time);
+                    tracing::trace!("debounce_timepoint {:?} {}", debounce_timepoint, tern!(now > debounce_timepoint, "scan!", "skip"));
+                }
+            }
+        }
+
+        if skip_scan {
+            tracing::trace!("skipping scan");
+            return Ok(());
+        }
 
         // make sure there is a cache/provider dir to cache search results in
         create_dir(join_path!(&self.config.cache_dir, "provider"))?;
 
-        for provider in &self.config.providers {
+        for provider in provider_filter.filter(&self.config.providers) {
+
+            tracing::debug!("scanning {}", &provider.name);
             let list = provider.as_provide().scan();
 
             if let Ok(list) = list {
-                // write the package list to a cache file
 
-                let s = serde_json::to_string(&list)?;
-                //let s = serde_json::to_string_pretty(&list)?;
+                let pkg_count = list.len();
+                let ver_count : usize = list.iter().map(|p| p.1.len()).sum();
+                tracing::debug!("[scan] {}: {} packages, {} versions", &provider.name, pkg_count, ver_count);
+
+                // write the package list to a cache file
+                let out = provider::ProviderFile {
+                    scan_time: now,
+                    packages: list,
+                };
+
+                //let s = serde_json::to_string(&out)?;
+                let s = serde_json::to_string_pretty(&out)?;
+                let mut file = File::create(&provider.cache_file)?;
+                file.write_all(s.as_bytes())?;
+            } else {
+                tracing::debug!("error while scanning {}", &provider.name);
+                let out = provider::ProviderFile {
+                    scan_time: now,
+                    packages: BTreeMap::new(),
+                };
+                let s = serde_json::to_string_pretty(&out)?;
                 let mut file = File::create(&provider.cache_file)?;
                 file.write_all(s.as_bytes())?;
             }
         }
         Ok(())
     }
+
+    pub fn cache_clear(&mut self) -> AResult<()> {
+
+        let retention = chrono::Duration::from_std(self.config.cache_retention)?;
+        //let retention = chrono::Duration::seconds(10);
+
+        let now = chrono::Utc::now().round_subsecs(0);
+        tracing::trace!("cache retention {} ({})", retention, now - retention);
+
+        self.load_db()?;
+
+        // gather a list of package files in the cache
+        let pkg_dir = join_path!(&self.config.cache_dir, "packages");
+        let mut pkgs = Vec::new();
+
+        for entry in walkdir::WalkDir::new(&pkg_dir)
+            .max_depth(1) // package files are a flat list at the root dir
+            .into_iter()
+            .skip(1)      // skip the root dir
+            .flatten()    // skip error entries
+        {
+            pkgs.push(entry.file_name().to_string_lossy().to_string());
+        }
+
+        for filename in pkgs {
+            let mut remove = false;
+
+            let mut touch = None;
+            let mut in_use = false;
+
+            match self.db.cache_files.iter().find(|e| e.filename == filename) {
+                None => {
+                    remove = true;
+                }
+                Some(ent) => {
+                    in_use = ent.in_use;
+                    touch = Some(ent.touched);
+
+                    if !ent.in_use {
+                        let remove_time = ent.touched + retention;
+                        if remove_time < now {
+                            remove = true;
+                        }
+                    }
+                }
+            }
+
+            tracing::trace!(touch=?touch, in_use=in_use, "cache {} {}", tern!(remove, "remove", "keep"), filename);
+
+            if remove {
+                let pkg_path = join_path!(&pkg_dir, &filename);
+                let ok = std::fs::remove_file(&pkg_path);
+                if let Err(e) = ok {
+                    eprintln!("failed to remove {}: {}", pkg_path.display(), e);
+                }
+
+                self.db.cache_files.retain(|e| e.filename != filename);
+            }
+        }
+
+        self.save_db()?;
+        Ok(())
+    }
+
+    pub fn cache_touch(&mut self, filename: &str, duration: Option<std::time::Duration>) -> AResult<()> {
+
+        dbg!(&filename);
+        dbg!(&duration);
+
+        //if let Ok(true) = std::fs::try_exists(filename) {
+        //}
+
+        todo!();
+    }
+
+    /// LOOKUP a package in the cache.
+    /// Given a PackageID, find the package file in the cache dir if it exists
+    fn cache_package_lookup(&self, id: &PackageID) -> Option<Utf8PathBuf> {
+
+        for entry in walkdir::WalkDir::new(join_path_utf8!(&self.config.cache_dir, "packages"))
+            .max_depth(1)
+            .into_iter()
+            .flatten()
+        {
+            let filename = entry.file_name().to_string_lossy();
+            if package::filename_match(&filename, id) {
+                tracing::trace!("cache_package_lookup() hit {}", filename);
+                let path = Utf8PathBuf::from_path_buf(entry.into_path());
+                return match path {
+                    Ok(path) => Some(path),
+                    Err(_) => {
+                        tracing::error!("cache hit invalid non-utf8 path");
+                        None
+                    }
+                }
+                //return Some(entry.into_path());
+            }
+
+        }
+        tracing::trace!("cache_package_lookup() miss {} {}", id.name, id.version);
+        None
+    }
+
+    /// LOOKUP a package in the cache OR FETCH a package and cache it.
+    fn cache_package_require(&self, id: &PackageID) -> AResult<Utf8PathBuf> {
+        let cached_file = match self.cache_package_lookup(id) {
+            Some(cached_file) => cached_file,
+            None => self.cache_fetch_cmd(id)?,
+        };
+        Ok(cached_file)
+    }
+
+    /// fetch a package by name AND version.
+    /// network: yes
+    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<Utf8PathBuf> {
+
+        tracing::debug!(pkg=id.name, version=id.version, "cache fetch");
+
+        // ensure that we have the cache/packages dir
+        std::fs::create_dir_all(join_path_utf8!(&self.config.cache_dir, "packages")).context("failed to create cache/packages dir")?;
+
+        let temp_name = format!("temp_download_{}", std::process::id());
+        let temp_path = join_path_utf8!(&self.config.cache_dir, temp_name);
+        let mut file = File::create(&temp_path)?;
+
+        for provider in &self.config.providers {
+
+            if let Ok(provider::ProviderFile{packages, ..}) = provider.load_file() {
+                if let Some(versions) = packages.get(&id.name) {
+                    if let Some(x) = versions.get(&id.version) {
+                        //dbg!(x);
+
+                        let final_path = join_path_utf8!(&self.config.cache_dir, "packages", &x.filename);
+
+                        let result = provider.as_provide().fetch(&mut file, id, &x.url);
+                        if result.is_ok() {
+                            file.sync_all()?;
+                            drop(file);
+                            tracing::trace!("moving fetched package file from {} to {}", temp_path, final_path);
+                            std::fs::rename(&temp_path, &final_path).context("failed to move file")?;
+                            //println!("final_path {:?}", final_path);
+                            return Ok(final_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("failed to fetch package"))
+    }
+
+} // impl App
+
+/// Build a full filepath from a relative path from a package file.
+fn build_pkg_file_path<T: AsRef<str>>(pkg: &db::DbPkg, path: &T) -> AResult<Utf8PathBuf> {
+    let mut fullpath = Utf8PathBuf::from(pkg.location.as_ref().context("package has no install location")?);
+    fullpath.push(path.as_ref());
+    Ok(fullpath)
+
+    //note: return Ok(fullpath.canonicalize()?) // can't canonicalize because that resolves symlinks
 }
 
-fn get_pkg_file_path(pkg: &db::DbPkg, path: &str) -> AResult<PathBuf> {
-    let mut fullpath = PathBuf::from(pkg.location.as_ref().context("package has no location")?);
-    fullpath.push(path);
-    //Ok(fullpath.canonicalize()?) // can't canonicalize because that resolves symlinks
-    Ok(fullpath)
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
 }

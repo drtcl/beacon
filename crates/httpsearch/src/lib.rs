@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 pub use reqwest::blocking::Client;
 
 const DEFAULT_TIMEOUT: u64 = 5;
+const CHANNEL_DIR_PREFIX : &str = "channel_";
+const CHANNELS_FILE : &str = "channels.json";
 
 type LinkText = String;
 type LinkUrlStr = String;
@@ -25,35 +27,119 @@ type ChannelName = String;
 // ChannelName -> [Version]
 type ChannelList = HashMap<ChannelName, Vec<PackageVersion>>;
 
-/// PkgName -> ChannelList
-type AllPackagesChannelList = HashMap<PackageName, ChannelList>;
-
 #[derive(Debug)]
 pub struct VersionInfo {
     pub url: LinkUrlStr,
     pub filename: PackagefileName,
     pub channels: Vec<String>,
-    //pub channels: Vec<u16>,
 }
 
 type VersionList = BTreeMap<PackageVersion, VersionInfo>;
 type PackageList = BTreeMap<PackageName, VersionList>;
 
-pub fn strip_slash(s: &str) -> &str {
+#[derive(Debug)]
+struct Report {
+    packages: PackageList,
+}
+
+impl Report {
+    fn new() -> Self {
+        Self {
+            packages: PackageList::new(),
+        }
+    }
+    fn add_version(&mut self, pkg_name: &str, version: &str, info: VersionInfo) {
+        self.packages.entry(pkg_name.to_string())
+            .or_default()
+            .insert(version.to_string(), info);
+    }
+    fn add_channel_version(&mut self, pkg_name: &str, channel: &str, version: &str) {
+        if let Some(vmap) = self.packages.get_mut(pkg_name) {
+            if let Some(info) = vmap.get_mut(version) {
+                if !info.channels.iter().any(|v| v == channel) {
+                    info.channels.push(channel.to_string());
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Link {
+    text: LinkText,
+    url: LinkUrlStr
+}
+
+impl Link {
+    fn version_info(&self) -> Option<(PackageVersion, VersionInfo)> {
+        if let Some((name, version)) = package::split_parts(&self.text) {
+            return Some((
+                version.to_string(),
+                VersionInfo {
+                    url: self.url.clone(),
+                    filename: self.text.clone(),
+                    channels: Vec::new(),
+                }
+            ));
+        }
+        None
+    }
+}
+
+/// return true for links that look like package file names
+fn is_pkg_link(link: &Link) -> bool {
+    package::is_packagefile_name(&link.text)
+}
+
+// return true for links to directories that follow the naming of channel dirs
+fn is_channel_dir(link: &Link) -> bool {
+    link.url.ends_with('/') && link.text.starts_with(CHANNEL_DIR_PREFIX)
+}
+
+/// return true for links to a CHANNELS_FILE file
+fn is_channels_json(link: &Link) -> bool {
+    // test if link is named "channels.json" and that the url ends in "/channels.json"
+    link.text == CHANNELS_FILE &&
+        link.url.strip_suffix(CHANNELS_FILE).and_then(|s| s.strip_suffix('/')).is_some()
+}
+
+/// remove any trailing "/" from a &str, returning a &str of the same lifetime
+fn strip_slash(s: &str) -> &str {
     match s.strip_suffix('/') {
         Some(s) => s,
         None => s,
     }
 }
 
-pub fn fetch_page(client: &Client, url: &Url) -> Result<String> {
-    let body = client.get(url.as_str()).send()?.text()?;
+/// example: "channel_stable/" -> "stable"
+fn channel_dir_to_name(dir: &str) -> Option<&str> {
+    strip_slash(dir).strip_prefix(CHANNEL_DIR_PREFIX)
+}
+
+/// split (or filter or partition) links into two Vec<Link> (X, Y)
+/// where X contains the ones that the filter function returns true for, and Y the ones that do not
+fn split_links<F>(mut links: Vec<Link>, mut f: F) -> (Vec<Link>, Vec<Link>)
+    where F: FnMut(&Link) -> bool
+{
+    let excluded = links.extract_if(|v| !f(v)).collect();
+    (links, excluded)
+}
+
+fn fetch_page(client: &Client, url: &Url) -> Result<String> {
+
+    //let head = client.head(url.as_str()).send()?;
+    //println!("head {:?}", head);
+    //println!("[head] headers {:?}", head.headers());
+
+    let resp = client.get(url.as_str()).send()?;
+    //println!("[get] headers {:?}", resp.headers());
+    let body = resp.text()?;
     tracing::trace!(url=url.as_str(), "fetch, body size {}", body.len());
     Ok(body)
 }
 
-/// return all links from a page [(text, url), ...]
-pub fn scrape_links(body: &str) -> Vec<(LinkText, LinkUrlStr)> {
+/// return all links from a page
+fn scrape_links(origin_url: &Url, body: &str) -> Vec<Link> {
 
     let doc = scraper::Html::parse_document(body);
     let a = scraper::Selector::parse("a").unwrap();
@@ -63,75 +149,24 @@ pub fn scrape_links(body: &str) -> Vec<(LinkText, LinkUrlStr)> {
         let v = element.value();
         if let Some(href) = v.attr("href") {
             let link_text = element.inner_html();
-            links.push((link_text.to_string(), href.to_string()));
+
+            // make the URL absolute
+            if let Ok(url) = origin_url.join(href) {
+                links.push(Link {
+                    text: link_text,
+                    //url: href.to_string(),
+                    url: url.to_string(),
+                })
+            }
         }
     }
     links
 }
 
-/// Given urls to channel.json for each package, parse the files and build a list of versions for
-/// channels for each package
-pub fn scrape_channels(client: &Client, name_urls: Vec<(String, String)>) -> Result<AllPackagesChannelList> {
-
-    let mut channels = AllPackagesChannelList::new();
-
-    for (pkg_name, url) in name_urls {
-        let body = fetch_page(client, &Url::parse(&url)?)?;
-        let pkg_channels : ChannelList = serde_json::from_str(&body)?;
-        channels.insert(pkg_name, pkg_channels);
-    }
-
-    Ok(channels)
-}
-
-//fn build_channel_map(channels: &AllPackagesChannelList) -> HashMap<&str, u16> {
-//
-//    let mut n = 0;
-//    let mut channel_map = HashMap::new();
-//    for (_pkg, chans) in channels {
-//        for (chan_name, _versions) in chans {
-//            channel_map.entry(chan_name.as_str()).or_insert_with(|| {
-//                let val = n;
-//                n += 1;
-//                val
-//            });
-//        }
-//    }
-//    channel_map
-//}
-
-fn apply_channels(
-    //channel_map: &HashMap<&str, u16>,
-    channels: &AllPackagesChannelList, 
-    packages: &mut PackageList) {
-
-    for (pkg_name, chans) in channels {
-        if let Some(map) = packages.get_mut(pkg_name) {
-            for (chan_name, versions) in chans {
-                //if let Some(channel_idx) = channel_map.get(chan_name.as_str()) {
-                    for version in versions {
-                        if let Some(packages) = map.get_mut(version) {
-                            if !packages.channels.contains(chan_name) {
-                                packages.channels.push(chan_name.clone());
-                            }
-                            //if !packages.channels.contains(channel_idx) {
-                                //packages.channels.push(*channel_idx);
-                            //}
-                        }
-                    }
-                //}
-            }
-        }
-    }
-}
-
-/// turn relative urls into absolute urls
-fn munge_links(root_url: &Url, links: &mut Vec<(LinkText, LinkUrlStr)>) {
-    for (_txt, url) in links {
-        if let Ok(joined) = root_url.join(url) {
-            *url = joined.as_str().to_string();
-        }
-    }
+/// wrapper around fetch_page() and scrape_links()
+fn scrape_links_from(client: &Client, url: &Url) -> Result<Vec<Link>> {
+    let body = fetch_page(client, url)?;
+    Ok(scrape_links(url, &body))
 }
 
 /// Scan an http server for packages
@@ -142,26 +177,19 @@ fn munge_links(root_url: &Url, links: &mut Vec<(LinkText, LinkUrlStr)>) {
 ///         foo-1.0.0.bpm
 ///         foo-2.0.0.bpm
 ///         bar-0.1.0.bpm
-/// 2) organized -- packages in directories of package name
+///
+/// 2) organized -- packages in directories of package name (allows for adding channels)
 ///     pkg/
 ///         foo/
 ///             foo-1.0.0.bpm
 ///             foo-2.0.0.bpm
-///             channels.json
+///             channels.json      (optional)
+///             channel_stable/    (optional)
+///                 foo-3.0.0.bpm
 ///         bar/
 ///             bar-0.1.0.bpm
-/// 3) organized-versioned -- packages in named and versioned directories
-///     pkg/
-///         foo/
-///             1.0.0/
-///                 foo-1.0.0.bpm
-///             2.0.0/
-///                 foo-2.0.0.bpm
-///         bar/
-///             0.1.0/
-///                 bar-0.1.0.bpm
 /// ```
-pub fn full_scan(timeout: Option<u64>, root_url: &str)-> Result<PackageList> {
+pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)-> Result<PackageList> {
 
     let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
 
@@ -170,175 +198,163 @@ pub fn full_scan(timeout: Option<u64>, root_url: &str)-> Result<PackageList> {
         .connect_timeout(std::time::Duration::from_secs(timeout))
         .build()?;
 
-    client_full_scan(&client, root_url)
+    client_full_scan(&client, root_url, pkg_name)
 }
 
 /// see [full_scan]
-pub fn client_full_scan(client: &Client, root_url: &str) -> Result<PackageList> {
+pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&str>) -> Result<PackageList> {
+
+    let mut report = Report::new();
 
     let mut root_url = std::borrow::Cow::Borrowed(root_url);
     if !root_url.ends_with('/') {
         root_url.to_mut().push('/');
     }
+    let root_url = Url::parse(&root_url)?;
 
     trace!(url=?root_url, "full_scan");
 
-    let root_url = Url::parse(&root_url)?;
+    let links = scrape_links_from(client, &root_url)?;
+    //let body = fetch_page(client, &root_url)?;
+    //let links = scrape_links(&body);
+    //let links = munge_links(&root_url, links);
 
-    let body = fetch_page(client, &root_url)?;
-    let mut links = scrape_links(&body);
-    munge_links(&root_url, &mut links);
+    // split off any packages that are at the toplevel
+    let (flat_package_links, links) = split_links(links, is_pkg_link);
 
-    let flat_package_links : Vec<(LinkText, LinkUrlStr)> = links
-        .extract_if(|(text, _url)| package::is_packagefile_name(text))
-        .collect();
+    for link in flat_package_links {
+        tracing::debug!("found at toplevel: {}", &link.text);
+        if let Some((pkg_name, version)) = package::split_parts(&link.text) {
+            if let Some((_version, info)) = link.version_info() {
 
-    for (txt, _url) in &flat_package_links {
-        tracing::debug!("found {}", txt);
+                let mut add = true;
+
+                if let Some(filter_name) = filter_name {
+                    if filter_name != pkg_name {
+                        add = false;
+                    }
+                }
+
+                if add {
+                    report.add_version(pkg_name, version, info);
+                }
+            }
+        }
     }
 
     // scan again, but only scan items that don't have a '.' in the name, as
     // package names cannot contain a '.' and the ones that look like a
     // directory (have a trailing slash)
-    links.retain(|(text, _url)| {
-        !text.contains('.') && text.ends_with('/')
+    // i.e. scan just directories that are package names
+    let (pkg_dir_links, _) = split_links(links, |link| {
+        !link.text.contains('.') && link.url.ends_with('/')
     });
 
-    let mut pkgs_with_channels = Vec::new();
+    for link in pkg_dir_links {
+        let pkg_name = strip_slash(&link.text);
+        let mut scan = true;
+        if let Some(filter_name) = filter_name {
+            if filter_name != pkg_name {
+                scan = false;
+            }
+        }
 
-    let name_links = links;
+        if scan {
+            scan_package_dir(client, &mut report, pkg_name, &link);
+        }
+    }
+
+    //dbg!(&report.packages);
+    Ok(report.packages)
+}
+
+fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, link: &Link) {
+
+    let ret = PackageList::new();
+
+    trace!(url=link.url, "scanning package dir {}", pkg_name);
+
+    // gather all links from this package dir
     let mut links = Vec::new();
-    for (name, url) in name_links {
+    if let Ok(url) = Url::parse(&link.url) {
+        match scrape_links_from(client, &url) {
+            Ok(l) => { links = l; },
+            Err(_) => { return; }
+        }
+    }
 
-        tracing::trace!("scanning versions of package {}", name);
+    // (1) extract links to package files
+    let (pkg_files, links) = split_links(links, is_pkg_link);
 
-        if let Ok(url) = Url::parse(&url) {
-            if let Ok(body) = fetch_page(client, &url) {
-
-                let mut _links = scrape_links(&body);
-                munge_links(&url, &mut _links);
-
-                let name = strip_slash(&name);
-
-                // remove the channels.json entry if it exists, save it for later
-                if let Some(channels_idx) = _links.iter().position(|(name, _url)| name == "channels.json") {
-                    let channels = _links.remove(channels_idx);
-                    pkgs_with_channels.push((name.to_string(), channels.1));
-                    tracing::trace!("{name} has channels");
-                }
-
-                // remove anything that looks like a package name but the package is named
-                // something other than what this directory is named
-                // example:
-                //      foo/
-                //          foo-1.0.0.bpm  (keep this)
-                //          bar-1.0.0.bpm  (remove this)
-                //          1.0.0/         (keep this)
-                //          something_else (remove this)
-                _links.retain(|(text, _url)| {
-                    if package::is_packagefile_name(text) {
-                        text.starts_with(strip_slash(name))
-                    } else {
-                        package::is_version_string(text)
-                    }
-                });
-
-                links.extend(
-                    _links
-                    .into_iter()
-                    .map(|(text, url)| {
-                        (name.to_string(), text, url)
-                    })
-                );
+    // add all found packages to the report
+    for Link{text, url} in pkg_files {
+        if let Some((name, version)) = package::split_parts(&text) {
+            if name != pkg_name {
+                // this file doesn't belong in this dir
+                // this is a package file for a package with a different name
+                tracing::warn!("ignored package in wrong dir: {}", url);
+            } else if let Some((version, info)) = link.version_info() {
+                report.add_version(pkg_name, &version, info);
             }
         }
     }
 
-    // extract the ones that look like packages names
-    let named_package_links : Vec<(LinkText, LinkUrlStr)> = links
-        .extract_if(|(_name, text, _url)| package::is_packagefile_name(text))
-        .map(|(_name, text, url)| (text, url))
-        .collect();
+    // (2) extract links to channel dirs
+    let (channel_dirs, links) = split_links(links, is_channel_dir);
 
-    for (txt, _url) in &named_package_links {
-        tracing::debug!("found {}", txt);
-    }
+    // (3) extract link to channels.json
+    let (channels_json, links) = split_links(links, is_channels_json);
 
-    let version_links = links;
-    let mut links = Vec::new();
-    for (name, version, url) in version_links {
-        if let Ok(url) = Url::parse(&url) {
-            if let Ok(body) = fetch_page(client, &url) {
-                let mut _links = scrape_links(&body);
-                munge_links(&url, &mut _links);
+    // TODO
+    // (removed) (4) extract links to version dirs
 
-                let version = strip_slash(&version);
+    // for each channel dir, scan for package files
+    for channel in channel_dirs {
+        if let Some(channel_name) = channel_dir_to_name(&channel.text) {
+            tracing::trace!(channel=channel_name, url=channel.url, "scraping channel dir");
+            if let Ok(url) = Url::parse(&channel.url) {
+                let links = scrape_links_from(client, &url).unwrap_or_default();
 
-                // remove anything that looks like a package name but the package is named
-                // something other than what this directory is named
-                // example:
-                //      foo/
-                //          1.0.0/
-                //              foo-1.0.0.bpm  (keep this)
-                //              foo-1.2.0.bpm  (remove this, bad version)
-                //              bar-1.0.0.bpm  (remove this, bad name)
-                //              something_else (remove this, doesn't look like a packagefile)
-                _links.retain(|(text, _url)| {
-                    if package::is_packagefile_name(text) {
-                        if let Some((name_part, version_part)) = package::split_parts(text) {
-                            if name_part.starts_with(&name) && version_part.starts_with(version) {
-                                return true;
+                // add the package files found in this dir to the overall packages list
+                let (channel_pkg_files, _) = split_links(links, is_pkg_link);
+                for link in channel_pkg_files {
+                    if let Some((link_pkg_name, version)) = package::split_parts(&link.text) {
+                        if pkg_name == link_pkg_name {
+                            if let Some((version, info)) = link.version_info() {
+                                report.add_version(pkg_name, &version, info);
+                                report.add_channel_version(pkg_name, channel_name, &version);
                             }
+                        } else {
+                            // this file doesn't belong in this dir
+                            // this is a package file for a package with a different name
+                            tracing::warn!("found package in wrong dir: {}", link.url);
                         }
                     }
-                    false
-                });
-
-                links.extend(_links);
+                }
             }
         }
     }
 
-    // once again, save the ones that look like packages
-    let versioned_package_links : Vec<(LinkText, LinkUrlStr)> =
-        links.extract_if(|(text, _url)| {
-            package::is_packagefile_name(text)
-        })
-        .collect();
-
-    for (txt, _url) in &versioned_package_links {
-        tracing::debug!("found {}", txt);
-    }
-
-    let mut packages = flat_package_links;
-    packages.extend(named_package_links);
-    packages.extend(versioned_package_links);
-
-    let mut ret: PackageList = BTreeMap::new();
-    for (filename, url) in packages {
-        if let Some((pkgname, version)) = package::split_parts(&filename) {
-            //println!("inserting {} {} {} {}", pkgname, version, filename, url);
-            ret.entry(pkgname.to_string()).or_default()
-                .insert(version.to_string(), VersionInfo{
-                url,
-                filename,
-                channels: Vec::new(),
-            });
+    // parse the channels.json file and apply any channels to versions as it specifies
+    if let Some(channels_json) = channels_json.first() {
+        if let Ok(url) = Url::parse(&channels_json.url) {
+            if let Ok(body) = fetch_page(client, &url) {
+                match serde_json::from_str::<ChannelList>(&body) {
+                    Ok(channels) => {
+                        //println!("channels json: {:?}", channels);
+                        for (chan_name, versions) in channels {
+                            for v in versions {
+                                report.add_channel_version(pkg_name, &chan_name, &v);
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        tracing::debug!("invalid json at {}", url.as_str());
+                    }
+                }
+            }
         }
     }
-
-    //dbg!(&pkgs_with_channels);
-    let channels = scrape_channels(client, pkgs_with_channels)?;
-    //dbg!(&channels);
-    //println!("channels {:?}", channels);
-
-    //let channel_map = build_channel_map(&channels);
-    //dbg!(&channel_map);
-
-    //apply_channels(&channel_map, &channels, &mut ret);
-    apply_channels(&channels, &mut ret);
-
-    Ok(ret)
 }
 
 pub fn download(timeout: Option<u64>, url: &str, write: &mut dyn std::io::Write) -> Result<u64> {
@@ -357,7 +373,7 @@ pub fn download(timeout: Option<u64>, url: &str, write: &mut dyn std::io::Write)
 
 pub fn client_download(client: &Client, url: &Url, write: &mut dyn std::io::Write) -> Result<u64> {
 
-    // TODO probably want to find a better way to download
+    // TODO probably want to find a better way to download,
     // this has the entire file in memory before writing to file
     let mut resp = client.get(url.as_str()).send()?;
     let err = resp.error_for_status_ref();

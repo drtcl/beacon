@@ -1,10 +1,12 @@
+use chrono::SubsecRound;
 use package::PackageID;
 use crate::*;
 
 //const DB_VERSION : u32 = 1;
 
 type HashString = String;
-type FilePath = String;
+//type FilePath = String;
+type FilePath = Utf8PathBuf;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 enum FileType {
@@ -23,7 +25,7 @@ pub struct FileInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DbPkg {
-    pub location: Option<PathBuf>,
+    pub location: Option<FilePath>,
 
     /// Which channel was used to install this package, if any.
     /// Pinned to a specific version?
@@ -31,15 +33,31 @@ pub struct DbPkg {
 
     pub metadata: package::MetaData,
 
+    pub package_file_filename: Option<String>
+
     //pub id: PackageID,
     //pub files: Vec<(FilePath, HashString)>,
     //pub files: Vec<FileInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct CacheFile {
+
+    pub filename: String,
+
+    // time last used
+    pub touched: chrono::DateTime<chrono::offset::Utc>,
+
+    pub in_use: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Db {
     //version: u32,
     pub installed: Vec<DbPkg>,
+
+    #[serde(default)]
+    pub cache_files: Vec<CacheFile>,
 }
 
 impl DbPkg {
@@ -48,6 +66,7 @@ impl DbPkg {
             metadata,
             location: None,
             versioning: Versioning::default(),
+            package_file_filename: None,
         }
     }
 }
@@ -56,6 +75,7 @@ impl Db {
     pub fn new() -> Self {
         Self {
             installed: Vec::new(),
+            cache_files: Vec::new(),
         }
     }
 
@@ -114,4 +134,34 @@ impl Db {
     //    let file = std::fs::File::open(file.as_ref())?;
     //    Db::from_reader(file)
     //}
+
+    pub fn cache_touch(&mut self, filename: &str) {
+        match self.cache_files.iter_mut().find(|e| e.filename == filename) {
+            Some(ent) => {
+                ent.touched = chrono::Utc::now().round_subsecs(0);
+            },
+            None => {
+                self.cache_files.push(CacheFile {
+                    touched: chrono::Utc::now().round_subsecs(0),
+                    filename: filename.to_string(),
+                    in_use: false,
+                });
+            }
+        }
+    }
+
+    pub fn cache_set_in_use(&mut self, filename: &str, in_use: bool) {
+        match self.cache_files.iter_mut().find(|e| e.filename == filename) {
+            Some(ent) => {
+                ent.in_use = in_use;
+            },
+            None => {
+                self.cache_files.push(CacheFile {
+                    touched: chrono::Utc::now().round_subsecs(0),
+                    filename: filename.to_string(),
+                    in_use,
+                });
+            }
+        }
+    }
 }

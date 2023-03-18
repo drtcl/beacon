@@ -1,16 +1,14 @@
-cache_dir = "${BPM}/../../crates/bpm/cache"
 database = "${BPM}/../../crates/bpm/db.json"
 use_default_target = true
+
+[cache]
+dir = "${BPM}/../../crates/bpm/cache"
+retention = "14 days"
 
 [mount]
 TARGET = "${BPM}/../../crates/bpm/install/target"
 EXTENSIONS = "${BPM}/../../crates/bpm/install/extensions"
 
 [providers]
-#main = "http://localhost:8000/pkg/"
-extra = "fs://${BPM}/../../crates/bpmpack/pkg2/"
-#extra = [
-    #"fs://${BPM}/../../crates/bpmpack/pkg/"
-    #"http://localhost:8000/pkg",
-#]
-
+test1 = "http://localhost:8000/pkg/"
+test2 = "fs://${BPM}/../../crates/bpmpack/pkg/"

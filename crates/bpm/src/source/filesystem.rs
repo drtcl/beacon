@@ -109,7 +109,7 @@ impl Search for FileSystem {
     fn search(&self, needle: &str) -> AResult<PackageList> {
         tracing::debug!(needle, root=?&self.root, "[Search] FileSystem::search");
 
-        let mut pkgs = fssearch::full_scan(&self.root)?;
+        let mut pkgs = fssearch::full_scan(&self.root, None)?;
 
         pkgs.retain(|name, _versions| {
             name.contains(needle)
@@ -127,7 +127,7 @@ impl Search for FileSystem {
     }
 
     fn scan(&self) -> AResult<PackageList> {
-        Ok(self.search("").ok().unwrap_or(PackageList::new()))
+        Ok(self.search("").ok().unwrap_or_default())
         //let results = self.search(|_| true);
         //dbg!(&results);
         //let pkgs = PackageList::new();

@@ -12,13 +12,14 @@ name = "httpsearch"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.70"
 package = { path = "../package" }
-regex = "1.8.4"
+
+anyhow = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
 reqwest = { version = "0.11.14", features = ["blocking", "stream"] }
 scraper = "0.15.0"
-serde_json = "1.0.104"
-tracing = "0.1.37"
-tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 url = "2.4.0"
-#tokio = { version = "1", freatures = ["full"] }

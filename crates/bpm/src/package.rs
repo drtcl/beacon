@@ -1,9 +1,10 @@
-use blake2::{Blake2b, Digest};
 use crate::AResult;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::PathBuf;
+use anyhow::Context;
+use bpmutil::*;
 
 fn semver_ser<S>(version: &semver::Version, s: S) -> Result<S::Ok, S::Error>
 where
@@ -136,52 +137,17 @@ where
 pub fn check_datachecksum(metadata: &package::MetaData, pkg_file: &mut File) -> AResult<bool> {
 
     //let described_sum = get_datachecksum(pkg_file)?;
-    let described_sum = metadata.data_hash.as_ref().expect("no data hash");
+    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
 
     pkg_file.rewind()?;
     let mut tar = tar::Archive::new(pkg_file);
     let mut data = package::seek_to_tar_entry("data.tar.zst", &mut tar)?;
 
-    let computed_sum = blake2_hash_reader(&mut data)?;
-    println!(
-        "computed data hash {} matches:{}",
-        computed_sum,
-        &computed_sum == described_sum
-    );
+    let computed_sum = blake3_hash_reader(&mut data)?;
+    let matches = &computed_sum == described_sum;
+    tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
 
-    Ok(&computed_sum == described_sum)
-}
-
-pub fn blake2_hash_reader<R: Read>(mut read: R) -> std::io::Result<String> {
-    let mut space = [0u8; 1024];
-    let mut blake2 = Blake2b::new();
-    //let mut len = 0;
-    loop {
-        match read.read(&mut space) {
-            Ok(n) if n > 0 => {
-                blake2.update(&space[0..n]);
-                //len += n;
-            }
-            Ok(_) => {
-                break;
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    }
-    //println!("read {} bytes", len);
-    let hash = blake2.finalize();
-    let hash = hex_string(hash.as_slice());
-    return Ok(hash);
-}
-
-pub fn hex_string(data: &[u8]) -> String {
-    let mut s = String::new();
-    for byte in data {
-        s += &format!("{byte:02x}");
-    }
-    s
+    Ok(matches)
 }
 
 pub fn name_parts(name: &str) -> Option<(&str, semver::Version)> {

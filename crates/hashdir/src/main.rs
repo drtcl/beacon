@@ -1,41 +1,10 @@
 use anyhow::Result;
-use blake2::{Blake2b, Digest};
 use clap::Arg;
 use jwalk::WalkDir;
 use rayon::prelude::*;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-
-struct Hasher {
-    blake: Blake2b,
-}
-
-impl Write for Hasher {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
-        self.blake.update(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> Result<(), std::io::Error> {
-        Ok(())
-    }
-}
-
-impl Hasher {
-    fn new() -> Self {
-        Self {
-            blake: Blake2b::new(),
-        }
-    }
-    fn finish(self) -> String {
-        let hash = self.blake.finalize();
-        let mut s = String::with_capacity(hash.as_slice().len() * 2);
-        for byte in hash.as_slice() {
-            s.push_str(&format!("{byte:02x}"));
-        }
-        s
-    }
-}
 
 fn remove_path_prefix<'a>(prefix: &Path, path: &'a Path) -> &'a Path {
     let path = match path.strip_prefix(prefix) {
@@ -46,15 +15,17 @@ fn remove_path_prefix<'a>(prefix: &Path, path: &'a Path) -> &'a Path {
 }
 
 fn get_file_hash(path: &Path) -> Result<String> {
-    let mut blake = Hasher::new();
+    let mut hasher = blake3::Hasher::new();
     let file = std::fs::File::open(path)?;
     let mut file = std::io::BufReader::new(file);
-    std::io::copy(&mut file, &mut blake)?;
-    Ok(blake.finish())
+    let _ = std::io::copy(&mut file, &mut hasher)?;
+    let hash = hasher.finalize().to_hex().to_string();
+    Ok(hash)
 }
 
 fn get_dir_hash(dir: &Path, show_files: bool) -> Result<String> {
-    let mut final_hasher = Hasher::new();
+
+    let mut final_hasher = blake3::Hasher::new();
 
     let mut files = Vec::<(PathBuf, Option<String>)>::new();
     for entry in WalkDir::new(dir).sort(true) {
@@ -78,7 +49,8 @@ fn get_dir_hash(dir: &Path, show_files: bool) -> Result<String> {
         write!(&mut final_hasher, "{}", path.display())?;
         final_hasher.write_all(hash.unwrap().as_bytes())?;
     }
-    Ok(final_hasher.finish())
+    let final_hash = final_hasher.finalize().to_hex().to_string();
+    Ok(final_hash)
 }
 
 fn main() -> Result<()> {

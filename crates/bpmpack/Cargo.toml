@@ -6,22 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-package = {"path" = "../package"}
-anyhow = "1.0.71"
-blake2 = "0.9.1"
-clap = "4.0.32"
-#clap = "2.33.3"
-flate2 = "1.0"
-ignore = "0.4.20"
+package   = {"path" = "../package"}
+anyhow    = { workspace = true }
+blake3    = { workspace = true }
+camino    = { workspace = true, features = ["serde1"]}
+clap      = { workspace = true }
+semver    = { workspace = true }
+tar       = { workspace = true }
+toml      = { workspace = true, features = ["preserve_order"] }
+zstd      = { workspace = true, features = ["zstdmt"]}
+ignore    = "0.4.20"
 indicatif = "0.17.3"
-#ignore = "0.4.18" # .gitignore style matching
-semver = "1.0.14"
-sha2 = "0.10.6"
-#semver = "0.9.0"
-tar = "0.4.38"
-zstd = { version = "0.12.1", features = ["zstdmt"] }
-toml = { version = "0.5.10", features = ["preserve_order"] }
 
+#ignore = "0.4.18" # .gitignore style matching
+#semver = "0.9.0"
 
 [features]
 default = ["mt"]

@@ -6,8 +6,10 @@ edition = "2021"
 [features]
 
 [dependencies]
-anyhow = "1.0.71"
-clap = "4.3.0"
+anyhow = { workspace = true }
+clap = { workspace = true }
+zstd = { workspace = true, features = ["experimental", "zstdmt"] }
+
+bytesize = "1.1.0"
 indicatif = "0.17.3"
-zstd = { version = "0.12.3", features = ["experimental", "zstdmt"] }
 

@@ -11,7 +11,7 @@ fn main() -> Result<()> {
         .arg(
             Arg::new("decompress")
                 .short('d')
-                .help("")
+                .help("decompress -- apply a patch to a file to create a new file. Treat <newfile> as a patch")
                 .action(clap::ArgAction::SetTrue)
                 .required(false),
         )
@@ -29,17 +29,19 @@ fn main() -> Result<()> {
             Arg::new("output")
                 .short('o')
                 .long("output")
-                .help("")
+                .help("<patchfile> when compessing, <newfile> when decompressing.")
                 .action(clap::ArgAction::Set)
                 .required(false),
         )
-        .get_matches();
+        .after_help(
+"EXAMPLES:
+  create a patch:
+    zstd_patch <oldfile> <newfile> -o <patchfile>
 
-    // create a patch
-    // zstdpatch <oldfile> <newfile> -o <patchfile>
-    //
-    // apply a patch
-    // zstdpatch -d <oldfile> <patchfile> -o <newfile>
+  apply a patch:
+    zstd_patch -d <oldfile> <patchfile> -o <newfile>"
+        )
+        .get_matches();
 
     let d = *matches.get_one::<bool>("decompress").unwrap();
 
@@ -72,8 +74,8 @@ fn get_threads() -> u32 {
 
 fn make_patch(oldfile: &str, newfile: &str, output: Option<&String>) -> Result<()> {
 
-    let old_compressed = Some(String::from("zst")) == Path::new(oldfile).extension().map(|s| s.to_string_lossy().into_owned());
-    let new_compressed = Some(String::from("zst")) == Path::new(newfile).extension().map(|s| s.to_string_lossy().into_owned());
+    let old_compressed = Some("zst") == Path::new(oldfile).extension().map(|s| s.to_string_lossy().into_owned()).as_deref();
+    let new_compressed = Some("zst") == Path::new(newfile).extension().map(|s| s.to_string_lossy().into_owned()).as_deref();
 
     let oldfile = std::fs::File::open(oldfile).expect("failed to open file");
     let mut oldfile : Box<dyn Read> = if old_compressed {
@@ -94,6 +96,7 @@ fn make_patch(oldfile: &str, newfile: &str, output: Option<&String>) -> Result<(
 
     let mut dict_data = Vec::new();
     std::io::copy(&mut BufReader::new(&mut oldfile), &mut dict_data)?;
+    eprintln!("dictionary size: {}", bytesize::to_string(dict_data.len() as u64, true));
 
     let dict = zstd::dict::EncoderDictionary::new(&dict_data[..], 12);
 

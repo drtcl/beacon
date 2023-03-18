@@ -8,14 +8,19 @@ use std::io::Read;
 use std::io::Write;
 use std::io::Seek;
 use std::fs::File;
-use std::path::Path;
+//use std::path::Path;
+use bpmutil::*;
+use anyhow::Context;
+pub use camino::Utf8Path;
+pub use camino::Utf8PathBuf;
 
 pub const PKG_FILE_EXTENSION: &str = "bpm";
 pub const DOTTED_PKG_FILE_EXTENSION: &str = ".bpm";
 
 pub type PkgName = String;
 pub type Version = String;
-pub type FilePath = String;
+//pub type FilePath = String;
+pub type FilePath = Utf8PathBuf;
 
 /// Map with ordering
 type OrderedMap<K, V> = BTreeMap<K, V>;
@@ -29,6 +34,8 @@ pub const META_FILE_NAME: &str = "meta.toml";
 #[cfg(feature = "json")]
 pub const META_FILE_NAME: &str = "meta.json";
 
+pub const DATA_FILE_NAME: &str = "data.tar.zst";
+
 const FILE_ATTR: &str = "f";
 const DIR_ATTR: &str = "d";
 const SYMLINK_ATTR: &str = "s";
@@ -39,6 +46,7 @@ pub enum FileType {
     Dir,
     File,
     Link(String),
+    //Link(Utf8PathBuf), //TODO ?
     //Link{
     //    //#[serde(rename="link")]
     //    to: String
@@ -231,12 +239,75 @@ impl MetaData {
 pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> Result<tar::Entry<'a, R>>
     where R: Read + Seek
 {
-    for entry in tar.entries_with_seek()? {
-        if let Ok(path) = entry.as_ref().unwrap().path() && path == Path::new(needle) {
-            return Ok(entry?);
+    let needle = Utf8Path::new(needle);
+    for entry in tar.entries_with_seek().context("failed to read tar archive")? {
+        let entry = entry.context("failed to read tar archive")?;
+        if let Ok(path) = entry.path() && path == needle {
+            return Ok(entry);
         }
+        //if let Ok(path) = entry.as_ref().unwrap().path() && path == needle {
+            //return Ok(entry?);
+        //}
     }
     Err(anyhow::anyhow!("path {} not found in tar archive", needle))
+}
+
+/// Check that package file is self consistent. The metadata file list and data hash matches.
+pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<bool> {
+
+    let metadata = get_metadata(pkg_file).context("error reading package metadata")?;
+
+    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
+
+    pkg_file.rewind()?;
+
+    let computed_sum = {
+        let mut tar = tar::Archive::new(pkg_file);
+        let mut data = seek_to_tar_entry("data.tar.zst", &mut tar)?;
+        let computed_sum = blake3_hash_reader(&mut data)?;
+        pkg_file = tar.into_inner();
+        computed_sum
+    };
+    let matches = &computed_sum == described_sum;
+    tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
+
+    if !matches {
+        tracing::error!("package file data hash mismatch {} != {}", computed_sum, described_sum);
+        return Ok(false);
+    }
+
+    let mut meta_filelist = metadata.files.clone();
+
+    // check the file list
+    pkg_file.rewind()?;
+    {
+        let mut outer_tar = tar::Archive::new(pkg_file);
+        let data_tar_zst = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
+        let zstd = zstd::Decoder::new(data_tar_zst)?;
+        let mut tar = tar::Archive::new(zstd);
+        for ent in tar.entries()? {
+            let ent = ent?;
+            let path = ent.path()?;
+            let path = path.to_string_lossy().to_string();
+            let path = Utf8Path::new(&path);
+            if meta_filelist.remove(path).is_none() {
+                tracing::error!("a file in the tar was not listed in the metadata {}", path);
+                return Ok(false);
+            }
+            // TODO also check that the file type matches
+        }
+
+        // if there are any remaining files, those were not in the tar
+        if !meta_filelist.is_empty() {
+            let path = meta_filelist.pop_first().unwrap().0;
+            tracing::error!("a file in the metadata was not in the data tar: {}", path);
+            return Ok(false);
+        }
+    }
+
+    tracing::trace!("package passes integrity check");
+
+    Ok(true)
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
