@@ -1,8 +1,17 @@
 use clap::{Command, arg, ArgAction};
 use crate::provider;
 
+pub fn pull_many_opt<'a>(matches: &'a clap::ArgMatches, key: &str) -> Option<Vec<&'a String>> {
+    matches.get_many::<String>(key).map(|v| v.collect::<Vec<&String>>())
+}
+
+pub fn pull_many<'a>(matches: &'a clap::ArgMatches, key: &str) -> Vec<&'a String> {
+    pull_many_opt(matches, key).unwrap_or_default()
+}
+
 pub fn parse_providers(matches: &clap::ArgMatches) -> provider::ProviderFilter {
-    let providers = matches.get_many::<String>("providers").map(|v| v.collect::<Vec<&String>>());
+    //let providers = matches.get_many::<String>("providers").map(|v| v.collect::<Vec<&String>>());
+    let providers = pull_many_opt(matches, "providers");
     providers.map_or(provider::ProviderFilter::empty(), |v| provider::ProviderFilter::from_names(v))
 }
 
@@ -26,7 +35,6 @@ pub fn get_cli() -> Command {
                 .about("search for packages")
                 .arg(arg!(<pkg> "(partial) package name to search for"))
                 .arg(arg!(--exact "match package name exactly"))
-
         )
         .subcommand(
             Command::new("list")
@@ -37,6 +45,18 @@ pub fn get_cli() -> Command {
                     .arg(arg!(--exact  "match package name exactly"))
                     .arg(providers_arg())
                     .arg(arg!(--json "output in json lines format"))
+                    .arg(arg!(--oneline "output in one packger per line format")
+                        .conflicts_with("json")
+                    )
+                    .arg(arg!(--limit <N> "Limit to the N latest versions per package")
+                        .value_parser(clap::value_parser!(u32))
+                        .default_value("0")
+                    )
+                    .arg(arg!(--channels <channels> "Filter on only the given channels")
+                        .alias("channel")
+                        .value_delimiter(',')
+                        .action(ArgAction::Append)
+                    )
                 )
                 .subcommand(Command::new("channels")
                     .arg(arg!([pkg] "package name substring"))
@@ -83,7 +103,7 @@ pub fn get_cli() -> Command {
                 .subcommand(Command::new("list-files").about("Query the list of files from a package")
                     .arg(arg!(<pkg> "The package to list the files of"))
                     .arg(arg!(--depth <n> "Maximum depth. Toplevel is depth 1.")
-                         .value_parser(clap::value_parser!(u32))
+                        .value_parser(clap::value_parser!(u32))
                     )
                     .arg(arg!(--absolute    "Show aboslute paths instead of package paths"))
                     .arg(arg!(--"show-type" "Show the type of each file"))
@@ -134,5 +154,8 @@ pub fn get_cli() -> Command {
                 .arg(arg!(<pkg> "package name or path to local package file"))
                 .arg(arg!(--channels "list channels the given package"))
         )
-
+        //.subcommand(
+        //    Command::new("pack")
+        //        .about("packaged bpm-pack utils")
+        //)
 }

@@ -1,25 +1,29 @@
+//! Package
+//!
+//! utility functions around package files
+//!
+//! Package File Naming:
+//! package naming follows the format of:
+//! <name>_<version>_<reserved>.bpm
+//! The reserved portion is for future possibility of including architecture or package types in
+//! the filename. This format mostly follows that of .deb file packages.
+
 #![feature(let_chains)]
 
-//use serde::ser::SerializeMap;
+use camino::{Utf8Path, Utf8PathBuf};
+use anyhow::Context;
 use anyhow::Result;
+use bpmutil::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Read;
-use std::io::Write;
-use std::io::Seek;
 use std::fs::File;
-//use std::path::Path;
-use bpmutil::*;
-use anyhow::Context;
-pub use camino::Utf8Path;
-pub use camino::Utf8PathBuf;
+use std::io::{Read, Write, Seek};
 
 pub const PKG_FILE_EXTENSION: &str = "bpm";
 pub const DOTTED_PKG_FILE_EXTENSION: &str = ".bpm";
 
 pub type PkgName = String;
 pub type Version = String;
-//pub type FilePath = String;
 pub type FilePath = Utf8PathBuf;
 
 /// Map with ordering
@@ -61,7 +65,7 @@ impl FileType {
         matches!(self, FileType::File)
     }
     pub fn is_link(&self) -> bool {
-        matches!(self, FileType::Link(_))
+        matches!(self, FileType::Link(_to))
         //matches!(self, FileType::Link{to})
     }
 }
@@ -323,24 +327,30 @@ pub fn get_filelist(pkg_file: &mut File) -> Result<OrderedMap<FilePath, FileInfo
     Ok(metadata.files)
 }
 
-/// "foo-1.2.3" -> ("foo", "1.2.3")
-/// "foo-1.2.3.bpm" -> ("foo", "1.2.3")
+/// "foo_1.2.3" -> ("foo", "1.2.3")
+/// "foo-bar_1.2.3-alpha.bpm" -> ("foo-bar", "1.2.3-alpha")
 pub fn split_parts(filename: &str) -> Option<(&str, &str)> {
-    filename.split_once('-').map(|(name, mut version)| {
-        if version.ends_with(DOTTED_PKG_FILE_EXTENSION) {
-            version = version.strip_suffix(DOTTED_PKG_FILE_EXTENSION).unwrap();
-        }
-        (name, version)
-    })
+
+    let filename = filename.strip_suffix(DOTTED_PKG_FILE_EXTENSION).unwrap_or(filename);
+    let mut parts = filename.split('_');
+
+    let name = parts.next();
+    let version = parts.next();
+    let _reserved = parts.next();
+    let _none = parts.next();
+
+    if let (Some(name), Some(version)) = (name, version) {
+        Some((name, version))
+    } else {
+        None
+    }
 }
 
 /// Names like "foo-1.0.0.bpm" and "bar-0.2.1.bpm" are packagefile names
 pub fn is_packagefile_name(text: &str) -> bool {
     if text.ends_with(DOTTED_PKG_FILE_EXTENSION) {
         if let Some((name, version)) = split_parts(text) {
-            if is_package_name(name) && is_version_string(version) {
-                return true;
-            }
+            return is_package_name(name) && is_version_string(version)
         }
     }
     false
@@ -348,16 +358,29 @@ pub fn is_packagefile_name(text: &str) -> bool {
 
 /// Names like "foo" and "bar" are package names
 pub fn is_package_name(text: &str) -> bool {
-    // cannot contain a '.' or '-'
     // cannot be empty string
-    !text.contains('.') && !text.contains('-') && !text.is_empty()
+    // only alphanumeric or '-'
+    // starts with [a-zA-Z]
+    // that is: matches [a-zA-Z][a-zA-Z0-9\-]*
+    !text.is_empty() && !text.contains('_')
+        && text.chars().next().unwrap().is_alphabetic()
+        && text.chars().all(|c| {
+            c.is_alphanumeric() || c == '-'
+        })
+}
+
+pub fn make_packagefile_name(pkg_name: &str, version: &str) -> String {
+    format!("{pkg_name}_{version}{DOTTED_PKG_FILE_EXTENSION}")
 }
 
 /// strings like "1.2.3" and "0.0.1-alpha+linux" are version strings
 pub fn is_version_string(text: &str) -> bool {
     // cannot be empty string
     // cannot contain the file extension
-    !text.is_empty() && !text.contains(PKG_FILE_EXTENSION)
+    // must start with a number
+    !text.is_empty()
+        && !text.contains(PKG_FILE_EXTENSION)
+        && text.chars().next().unwrap().is_ascii_digit()
 }
 
 pub fn filename_match(filename: &str, id: &PackageID) -> bool {
@@ -370,6 +393,26 @@ pub fn filename_match(filename: &str, id: &PackageID) -> bool {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn package_names() {
+
+        assert_eq!(split_parts("foo_1.2.3.bpm"), Some(("foo", "1.2.3")));
+        assert_eq!(split_parts("foo-bar_1.2.3-alpha.1.bpm"), Some(("foo-bar", "1.2.3-alpha.1")));
+
+        assert_eq!(split_parts("foo-1.2.3.bpm"), None);
+
+        assert!(is_packagefile_name("foo_1.2.3.bpm"));
+        assert!(is_packagefile_name("foo-bar_1.2.3.bpm"));
+        assert!(is_packagefile_name("foo-bar_1.2.3-alpha.bpm"));
+        assert!(is_packagefile_name("foo-bar_1.2.3-alpha.0.bpm"));
+        assert!(is_packagefile_name("foo-bar_1.2.3+linux.bpm"));
+        assert!(is_packagefile_name("foo-bar_1.2.3-alpha+linux.bpm"));
+
+        assert_eq!(make_packagefile_name("foo", "1.2.3"), "foo_1.2.3.bpm");
+        assert!(is_packagefile_name(&make_packagefile_name("foo", "1.2.3")));
+        assert_eq!(split_parts(&make_packagefile_name("foo", "1.2.3")), Some(("foo", "1.2.3")));
+    }
 
     fn get_instance() -> MetaData {
         let mut meta = MetaData {

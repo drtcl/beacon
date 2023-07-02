@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use indicatif::ProgressBar;
-use semver::Version;
+//use semver::Version;
 use std::collections::HashSet;
 use std::collections::HashMap;
 use std::fs::File;
@@ -23,6 +23,7 @@ use std::io::{BufWriter, BufReader, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
+use version::Version;
 
 use std::io::BufRead;
 use std::io::Seek;
@@ -65,7 +66,6 @@ enum FileType {
     Dir,
     File,
     Link(Utf8PathBuf),
-    //Link(String),
 }
 
 impl From<FileType> for package::FileType {
@@ -73,8 +73,7 @@ impl From<FileType> for package::FileType {
         match ft {
             FileType::Dir => package::FileType::Dir,
             FileType::File => package::FileType::File,
-            FileType::Link(path) => package::FileType::Link(format!("{}", path)),
-            //FileType::Link(path) => package::FileType::Link{to: format!("{}", path)},
+            FileType::Link(path) => package::FileType::Link(path.to_string()),
         }
     }
 }
@@ -105,12 +104,12 @@ struct FileEntry {
 }
 
 impl FileEntry {
-    pub fn is_dir(&self) -> bool {
+    fn is_dir(&self) -> bool {
         matches!(self.file_type, FileType::Dir)
     }
-    //pub fn is_symlink(&self) -> bool {
-    //    matches!(self.file_type, FileType::Link(_))
-    //}
+    fn is_symlink(&self) -> bool {
+        matches!(self.file_type, FileType::Link(_))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +125,70 @@ struct FileListing {
 //        self.files.extend(other.files.into_iter());
 //    }
 //}
+
+fn cwd() -> PathBuf {
+    std::env::current_dir().expect("failed to get current dir")
+}
+
+fn main() -> Result<()> {
+
+    let cli = args::get_args();
+    let matches = cli.get_matches();
+
+    match matches.subcommand() {
+        Some(("list", matches)) => {
+            let file = matches.get_one::<String>("pkgfile").unwrap();
+            subcmd_list_files(Path::new(file))?;
+            std::process::exit(0);
+        },
+        Some(("test-ignore", matches)) => {
+            subcmd_test_ignore(matches)?;
+            std::process::exit(0);
+        },
+        Some(_) => {
+            unreachable!();
+        }
+        None => {
+            main_make_package(&matches)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a GitIgnore using a list of ignore files
+fn build_ignore(paths: Vec<Utf8PathBuf>, patterns: Vec<String>) -> Result<Option<Gitignore>> {
+
+    if paths.is_empty() && patterns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
+
+    for ignore_file in paths {
+        let ignore_file = Path::new(&ignore_file);
+        if !ignore_file.exists() {
+            anyhow::bail!("ignore-file does not exist");
+        }
+
+        let read = std::io::BufReader::new(File::open(ignore_file)?);
+        let mut line_num = 1;
+        for line in read.lines() {
+            let mut from = ignore_file.to_path_buf();
+            from.set_file_name(format!("{}:{}", from.file_name().unwrap().to_str().unwrap(), line_num));
+            builder.add_line(Some(from), &line?)?;
+            line_num += 1;
+        }
+
+    }
+
+    for pattern in patterns {
+        builder.add_line(None, &pattern)?;
+    }
+
+    let ignore = builder.build()?;
+    Ok(Some(ignore))
+}
 
 /// Walk the filesystem, discovering all files from the given paths
 fn file_discovery(paths: Vec<String>) -> FileListing {
@@ -191,83 +254,6 @@ fn file_discovery(paths: Vec<String>) -> FileListing {
     FileListing { files }
 }
 
-fn cwd() -> PathBuf {
-    std::env::current_dir().expect("failed to get current dir")
-}
-
-fn subcmd_list_files(file: &Path) -> Result<()> {
-
-    let mut file = std::fs::File::open(file).context("failed to open package file")?;
-
-    package::package_integrity_check(&mut file)?;
-
-    file.rewind()?;
-
-    let mut tar = tar::Archive::new(file);
-    let data = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut tar)?;
-    let zstd = zstd::Decoder::new(data)?;
-    let mut tar = tar::Archive::new(zstd);
-    for ent in tar.entries()? {
-        let e = ent?;
-        let path = e.path()?;
-        println!("{}", path.display());
-    }
-    Ok(())
-}
-
-fn main() -> Result<()> {
-    let matches = args::get_args().get_matches();
-
-    match matches.subcommand() {
-        Some(("list", matches)) => {
-            let file = matches.get_one::<String>("pkgfile").unwrap();
-            subcmd_list_files(Path::new(file))?;
-            std::process::exit(0);
-        },
-        Some(("test-ignore", matches)) => {
-            subcmd_test_ignore(matches)?;
-            std::process::exit(0);
-        },
-        Some(_) => {
-            unreachable!();
-        }
-        None => {
-            main_make_package(&matches)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Build a GitIgnore using a list of ignore files
-fn build_ignore(paths: Vec<Utf8PathBuf>) -> Result<Option<Gitignore>> {
-
-    if paths.is_empty() {
-        return Ok(None);
-    }
-
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
-
-    for ignore_file in paths {
-        let ignore_file = Path::new(&ignore_file);
-        if !ignore_file.exists() {
-            anyhow::bail!("ignore-file does not exist");
-        }
-
-        let read = std::io::BufReader::new(File::open(ignore_file)?);
-        let mut line_num = 1;
-        for line in read.lines() {
-            let mut from = ignore_file.to_path_buf();
-            from.set_file_name(format!("{}:{}", from.file_name().unwrap().to_str().unwrap(), line_num));
-            builder.add_line(Some(from), &line?)?;
-            line_num += 1;
-        }
-
-    }
-    let ignore = builder.build()?;
-    Ok(Some(ignore))
-}
-
 /// Calls file_discovery(), then marks ignored files,
 /// and optionally adds a wrapper root directory to all files
 fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<Gitignore>) -> FileListing {
@@ -328,16 +314,17 @@ fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<G
 
 fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
 
-    let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
-
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
     let verbose = *matches.get_one::<bool>("verbose").unwrap();
 
+    let patterns = matches.get_many::<String>("pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
     let ignore_files = matches.get_many::<String>("ignore-file").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
-    let ignore = build_ignore(ignore_files)?;
+    let ignore = build_ignore(ignore_files, patterns)?;
 
+    let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
     let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore);
 
+    let mut tw = tabwriter::TabWriter::new(std::io::stdout());
     let mut ignored_parents = HashSet::new();
     for file in file_list.files {
         if file.ignore {
@@ -349,37 +336,60 @@ fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
             }
             if verbose || !parent_ignored {
                 let reason = if let Some(reason) = &file.ignore_reason {
-                    format!("({} {})", reason.file, reason.pattern)
+                    format!("({}:{})", reason.file, reason.pattern)
                 } else {
                     String::new()
                 };
-                println!("I  {}    {}", file.pkg_path, reason);
+                //println!("I  {}    {}", file.pkg_path, reason);
+                writeln!(&mut tw, "I   {}\t{}", file.pkg_path, reason)?;
             }
             if file.is_dir() {
                 ignored_parents.insert(file.pkg_path);
             }
         } else if let Some(reason) = file.ignore_reason {
             let reason = format!("({} {})", reason.file, reason.pattern);
-            println!("Aw {}    {}", file.pkg_path, reason);
-        } else {
-            if verbose {
-                println!("A  {}", file.pkg_path);
-            }
+            //println!("Aw {}    {}", file.pkg_path, reason);
+            writeln!(&mut tw, "Aw  {}\t{}", file.pkg_path, reason)?;
+        } else if verbose {
+            //println!("A  {}", file.pkg_path);
+            writeln!(&mut tw, "A   {}\t", file.pkg_path)?;
         }
     }
 
+    tw.flush()?;
+
+    Ok(())
+}
+
+fn subcmd_list_files(file: &Path) -> Result<()> {
+
+    let mut file = std::fs::File::open(file).context("failed to open package file")?;
+
+    package::package_integrity_check(&mut file)?;
+
+    file.rewind()?;
+
+    let mut tar = tar::Archive::new(file);
+    let data = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut tar)?;
+    let zstd = zstd::Decoder::new(data)?;
+    let mut tar = tar::Archive::new(zstd);
+    for ent in tar.entries()? {
+        let e = ent?;
+        let path = e.path()?;
+        println!("{}", path.display());
+    }
     Ok(())
 }
 
 fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
 
+    let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
+    let verbose = *matches.get_one::<bool>("verbose").unwrap();
     let mount = matches.get_one::<String>("mount").unwrap();
+    let require_semver = *matches.get_one::<bool>("semver").unwrap();
 
-    // the version must be of the right semver format
-    let package_version_str = matches.get_one::<String>("version").unwrap();
-    let package_version = Version::parse(package_version_str).expect("invalid version");
-
-    let package_name = matches.get_one::<String>("name").unwrap();
+    let compress_level = *matches.get_one::<u32>("compress-level").expect("expected compression level") as i32;
+    let compress_level = if 0 == compress_level { DEFAULT_ZSTD_LEVEL } else { compress_level };
 
     let deps: Vec<(String, Option<String>)> = matches.get_many::<String>("depend")
         .map(|refs| refs.into_iter().map(|s| s.to_string()).collect())
@@ -397,28 +407,29 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
         })
         .collect();
 
-    let compress_level = *matches.get_one::<u32>("compress-level").expect("expected compression level") as i32;
-    let compress_level = if 0 == compress_level { DEFAULT_ZSTD_LEVEL } else { compress_level };
-
-    let output_dir = match matches.get_one::<String>("output-dir") {
-        None => cwd(),
-        Some(path) => {
-            let path = PathBuf::from(path);
-            if !path.exists() {
-                anyhow::bail!("output-dir path does not exist");
-            }
-            path
-        }
-    };
-
-    let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
-
-    let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
-    let verbose = *matches.get_one::<bool>("verbose").unwrap();
+    let output_dir = matches.get_one::<String>("output-dir").map_or(cwd(), PathBuf::from);
+    if !output_dir.try_exists().ok().unwrap_or(false) {
+        anyhow::bail!("output-dir path does not exist");
+    }
 
     let ignore_files = matches.get_many::<String>("ignore-file").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
-    let ignore = build_ignore(ignore_files)?;
+    let ignore = build_ignore(ignore_files, Vec::new())?;
 
+    let package_name = matches.get_one::<String>("name").unwrap();
+    if !package::is_package_name(package_name) {
+        anyhow::bail!("invalid package name. (must match [a-zA-Z][a-zA-Z0-9\\-]*)")
+    }
+
+    // the version must be of the right semver format
+    let package_version = Version::new(matches.get_one::<String>("version").unwrap());
+    if !package::is_version_string(&package_version) {
+        anyhow::bail!("invalid version")
+    }
+    if require_semver && !package_version.is_semver() {
+        anyhow::bail!("Version is not a valid semver. A valid semver is required because the --semver option was used")
+    }
+
+    let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
     let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore);
 
     // file names
@@ -432,32 +443,46 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
     meta_file_path.push(package::META_FILE_NAME);
 
     let mut package_file_path = PathBuf::from(&output_dir);
-    package_file_path.push(format!("{}-{}{}", package_name, package_version, package::DOTTED_PKG_FILE_EXTENSION));
+    package_file_path.push(package::make_packagefile_name(package_name, package_version.as_str()));
 
     // scan the file list and verify symlinks
-    //verify_symlinks(&file_list);
+    let mut symlink_settings = SymlinkSettings::default();
+    symlink_settings.allow_dne = *matches.get_one::<bool>("allow-symlink-dne").unwrap();
+    symlink_settings.allow_outside = *matches.get_one::<bool>("allow-symlink-outside").unwrap();
+    verify_symlinks(&symlink_settings, &file_list)?;
 
-    let data_tar_file = BufWriter::with_capacity(1024 * 1024, File::create(tarball_file_path.as_path())?);
-    let mut data_tar_hasher = HashingWriter::new(data_tar_file, blake3::Hasher::new());
-    let mut data_tar_file = zstd::stream::write::Encoder::new(&mut data_tar_hasher, compress_level)?;
+    // layers of wrapping:
+    // 1. raw file
+    // 2. BufWriter
+    // 3. CountingWriter (for compressed size)
+    // 4. HashingWriter
+    // 5. zstd compressor
+    // 6. CountingWriter (for uncompressed size)
+    // 7. tar builder
+
+    let data_tar_file = File::create(tarball_file_path.as_path())?;
+    let data_tar_bufwriter = BufWriter::with_capacity(1024 * 1024, data_tar_file);
+    let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
+
+    //let data_tar_file = BufWriter::with_capacity(1024 * 1024, File::create(tarball_file_path.as_path())?);
+    //let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_file);
+    let mut data_tar_hasher = HashingWriter::new(&mut data_tar_compressed_size_writer, blake3::Hasher::new());
+    let mut data_tar_zstd = zstd::stream::write::Encoder::new(&mut data_tar_hasher, compress_level)?;
 
     #[cfg(feature="mt")]
-    data_tar_file.multithread(get_threads())?;
+    data_tar_zstd.multithread(get_threads())?;
 
-    let mut data_tar_file = data_tar_file.auto_finish();
-    let mut data_tar = tar::Builder::new(&mut data_tar_file);
-    data_tar.follow_symlinks(false);
+    let mut data_tar_zstd = data_tar_zstd.auto_finish();
+
+    let mut data_tar_uncompressed_size_writer = CountingWriter::new(&mut data_tar_zstd);
+
+    let mut data_tar_tar = tar::Builder::new(&mut data_tar_uncompressed_size_writer);
+    data_tar_tar.follow_symlinks(false);
 
     let mut meta = package::MetaData::new(package::PackageID {
         name: package_name.clone(),
         version: format!("{}", package_version),
     });
-    // for entry in file_list.files {
-    //     meta.add_file(format!("{}", entry.pkg_path.display()), package::FileInfo {
-    //         hash: entry.hash,
-    //         filetype: entry.file_type.into(),
-    //     });
-    // }
     for pair in &deps {
         meta.add_dependency(package::DependencyID{
             name: pair.0.clone(),
@@ -506,7 +531,7 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
 
         match entry.file_type {
             FileType::Dir => {
-                data_tar.append_dir(&entry.pkg_path, &entry.full_path).context("inserting dir")?;
+                data_tar_tar.append_dir(&entry.pkg_path, &entry.full_path).context("inserting dir")?;
                 if verbose {
                     //println!("Ad\t{}/", entry.pkg_path.display());
                     pb.suspend(|| println!("Ad\t{}/", entry.pkg_path));
@@ -526,7 +551,7 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
 
                 let mut reader = HashingReader::new(BufReader::new(fd), blake3::Hasher::new());
 
-                data_tar.append_data(&mut header, &entry.pkg_path, &mut reader).context("inserting file")?;
+                data_tar_tar.append_data(&mut header, &entry.pkg_path, &mut reader).context("inserting file")?;
                 let (_, hasher) = reader.into_parts();
                 let hash = hasher.finalize();
                 entry.hash = Some(hash.to_hex().to_string());
@@ -549,7 +574,7 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Symlink);
                 header.set_size(0);
-                data_tar.append_link(&mut header, &entry.pkg_path, link_path).context("inserting symlink")?;
+                data_tar_tar.append_link(&mut header, &entry.pkg_path, link_path).context("inserting symlink")?;
 
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(link_path.as_str().as_bytes());
@@ -571,14 +596,22 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
         pb.inc(1);
     }
 
-    data_tar.finish()?;
-    drop(data_tar);
-    data_tar_file.flush()?;
-    drop(data_tar_file);
+    // unwrap all the layers of writers
+
+    data_tar_tar.finish()?;
+    drop(data_tar_tar);
+
+    let uncompressed_size = data_tar_uncompressed_size_writer.count;
+
+    data_tar_zstd.flush()?;
+    drop(data_tar_zstd);
 
     pb.finish_and_clear();
 
-    let (_, hasher) = data_tar_hasher.into_parts();
+    let (data_tar_compressed_size_writer, hasher) = data_tar_hasher.into_parts();
+
+    let compressed_size = data_tar_compressed_size_writer.count;
+
     //let data_tar_hash = hex_string(hasher.finalize().as_slice());
     let data_tar_hash = hasher.finalize().to_hex().to_string();
     meta.data_hash = Some(data_tar_hash);
@@ -592,10 +625,7 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
     // --- create a single tar package file ---
     let package_file = File::create(&package_file_path)?;
     let package_file = BufWriter::with_capacity(1024 * 1024, package_file);
-    let mut hasher = HashingWriter {
-        hasher: blake3::Hasher::new(),
-        inner: package_file,
-    };
+    let mut hasher = HashingWriter::new(package_file, blake3::Hasher::new());
     let mut package_tar = tar::Builder::new(&mut hasher);
 
     package_tar.append_path_with_name(&meta_file_path, package::META_FILE_NAME)?;
@@ -603,9 +633,17 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
     package_tar.finish()?;
     drop(package_tar);
 
+    let package_size = hasher.count;
+
     hasher.flush()?;
     let (package_file, hasher) = hasher.into_parts();
-    println!("package hash (blake3): {}", hasher.finalize());
+
+    println!();
+    println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
+    println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
+    println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
+    println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
+    println!("package hash [blake3]:  {}", hasher.finalize());
 
     package_file.into_inner()?.sync_all()?;
 
@@ -616,10 +654,7 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
         std::fs::remove_file(tarball_file_path.as_path())?;
     }
 
-    println!(
-        "Package created at {}",
-        std::fs::canonicalize(package_file_path.as_path())?.display()
-    );
+    println!("Package created at {}", std::fs::canonicalize(package_file_path.as_path())?.display());
 
     Ok(())
 }
@@ -627,8 +662,7 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
 fn canonicalize_no_symlink(path: &Utf8Path) -> Result<Utf8PathBuf> {
     if path.is_symlink() {
         return Ok(path
-            .parent()
-            .unwrap()
+            .parent().context("path had no parent")?
             .canonicalize_utf8()?
             .join(path.file_name().unwrap()));
     }
@@ -640,6 +674,7 @@ fn canonicalize_no_symlink(path: &Utf8Path) -> Result<Utf8PathBuf> {
 struct HashingReader<Inner, Hasher> {
     inner: Inner,
     hasher: Hasher,
+    count: u64,
 }
 
 impl<Inner: Read, Hasher: Write> std::io::Read for HashingReader<Inner, Hasher> {
@@ -647,6 +682,7 @@ impl<Inner: Read, Hasher: Write> std::io::Read for HashingReader<Inner, Hasher> 
         let ret = self.inner.read(data);
         if let Ok(n) = ret {
             self.hasher.write_all(&data[0..n])?;
+            self.count += n as u64;
         }
         ret
     }
@@ -654,16 +690,42 @@ impl<Inner: Read, Hasher: Write> std::io::Read for HashingReader<Inner, Hasher> 
 
 impl<Inner, Hasher> HashingReader<Inner, Hasher> {
     fn new(inner: Inner, hasher: Hasher) -> Self {
-        Self { inner, hasher }
+        Self { inner, hasher, count: 0 }
     }
     fn into_parts(self) -> (Inner, Hasher) {
         (self.inner, self.hasher)
     }
 }
 
+struct CountingWriter<W: Write> {
+    inner: W,
+    count: u64,
+}
+
+impl<W: Write> CountingWriter<W> {
+    fn new(w: W) -> Self {
+        Self { inner: w, count: 0}
+    }
+}
+
+impl<W: Write> std::io::Write for CountingWriter<W> {
+    fn write(&mut self, data: &[u8]) -> Result<usize, std::io::Error> {
+        let ret = self.inner.write(data);
+        if let Ok(n) = ret {
+            self.count += n as u64;
+            //println!("{:p} count {}", self, self.count);
+        }
+        ret
+    }
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        self.inner.flush()
+    }
+}
+
 struct HashingWriter<Inner, Hasher> {
     inner: Inner,
     hasher: Hasher,
+    count: u64,
 }
 
 impl<Inner: Write, Hasher: Write> std::io::Write for HashingWriter<Inner, Hasher> {
@@ -671,6 +733,7 @@ impl<Inner: Write, Hasher: Write> std::io::Write for HashingWriter<Inner, Hasher
         let ret = self.inner.write(data);
         if let Ok(n) = ret {
             self.hasher.write_all(&data[0..n])?;
+            self.count += n as u64;
         }
         ret
     }
@@ -681,7 +744,7 @@ impl<Inner: Write, Hasher: Write> std::io::Write for HashingWriter<Inner, Hasher
 
 impl<Inner, Hasher> HashingWriter<Inner, Hasher> {
     fn new(inner: Inner, hasher: Hasher) -> Self {
-        Self { inner, hasher }
+        Self { inner, hasher, count: 0 }
     }
     fn into_parts(self) -> (Inner, Hasher) {
         (self.inner, self.hasher)
@@ -703,43 +766,120 @@ impl<Inner, Hasher> HashingWriter<Inner, Hasher> {
 //    ret
 //}
 
-//fn verify_symlinks(FileListing { files }: &FileListing) -> Result<()> {
-//    dbg!(files);
-//
-//    for file_entry in files {
-//        if let FileType::Link(ref link_content) = file_entry.file_type {
-//            let link_pkg_path = if link_content.is_relative() {
-//                file_entry
-//                    .pkg_path
-//                    .parent()
-//                    .unwrap()
-//                    .join(link_content)
-//                    .canonicalize()?
-//            } else {
-//                link_content
-//                    .canonicalize()
-//                    .context("failed to canonicalize link path")?
-//            };
-//
-//            println!(
-//                "LINK {:?} [{:?}] -> {:?}",
-//                file_entry.pkg_path, link_content, link_pkg_path
-//            );
-//            //let link_pkg_path = normalize_path(link_pkg_path);
-//            //println!("?LINK {:?} [{:?}] -> {:?}", file_entry.pkg_path, link_content, link_pkg_path);
-//
-//            let iter = files.iter().find(|v| {
-//                println!("checking {:?} == {:?}", link_content, v);
-//                &v.pkg_path == &link_pkg_path
-//            });
-//
-//            if iter.is_none() {
-//                println!(
-//                    "WARNING: symlink {:?} -> {:?} points outsize of package",
-//                    file_entry.pkg_path, link_pkg_path
-//                );
-//            }
-//        }
-//    }
-//    Ok(())
-//}
+// symlinks could:
+// * point outside of the package
+// * point to non-existent files
+// * point to absolute paths
+fn partial_canonicalize(path: &Utf8Path) -> Utf8PathBuf {
+    for parent in path.ancestors().skip(1) {
+        //println!("ancestor {} exists {:?}", parent, parent.try_exists());
+        if let Ok(true) = parent.try_exists() {
+            let rest = path.strip_prefix(parent);
+            let parent = parent.canonicalize_utf8();
+            //println!("  !! {:?}", parent);
+            //println!("  rest {:?}", rest);
+            if let (Ok(parent), Ok(rest)) = (parent, rest) {
+                return parent.join(rest);
+            }
+            break;
+        }
+    }
+    path.to_path_buf()
+}
+
+#[derive(Debug)]
+enum SymlinkError {
+    AbsolutePath(Utf8PathBuf, Utf8PathBuf),
+    NonExistent(Utf8PathBuf, Utf8PathBuf),
+    OutsidePackage(Utf8PathBuf, Utf8PathBuf),
+}
+
+impl std::fmt::Display for SymlinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AbsolutePath(link, to) => {
+                write!(f, "absolute path: {link} -> {to}")
+            }
+            Self::NonExistent(link, to) => {
+                write!(f, "non-existent path: {link} -> {to}")
+            }
+            Self::OutsidePackage(link, to) => {
+                write!(f, "links to outside of package: {link} -> {to}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SymlinkSettings {
+    allow_outside: bool,
+    allow_dne: bool,
+}
+
+fn verify_symlinks(settings: &SymlinkSettings, listing: &FileListing) -> Result<()> {
+
+    // a filter over files that removes ignored files
+    let files = listing.files.iter().filter(|e| !e.ignore);
+
+    let mut dirs = None;
+    let mut contains_dir = |path: &Utf8Path| -> bool {
+        if dirs.is_none() {
+            dirs = Some(HashSet::new());
+            for e in files.clone().filter(|e| e.is_dir()) {
+                dirs.as_mut().unwrap().insert(e.full_path.clone());
+            }
+        }
+
+        dirs.as_ref().unwrap().contains(path)
+    };
+
+    let errs : Vec<SymlinkError> = files.clone().filter(|e| e.is_symlink()).filter_map(|entry| {
+
+        if let FileType::Link(to) = &entry.file_type {
+
+            if !to.is_relative() {
+                return Some(SymlinkError::AbsolutePath(entry.pkg_path.clone(), to.clone()));
+            }
+
+            let joined = entry.full_path.parent().expect("file path had no parent").join(to);
+            let exists = joined.try_exists().ok().unwrap_or(false);
+
+            if !exists && !settings.allow_dne {
+                return Some(SymlinkError::NonExistent(entry.pkg_path.clone(), to.clone()));
+            }
+
+            // now check if it points to a file outside the package
+            let outside = if exists {
+                let joined = joined.canonicalize_utf8().expect("failed to canonicalize path");
+                let outside = !files.clone().any(|e| e.full_path == joined);
+                outside
+            } else {
+                let mut outside = || {
+                    let joined = partial_canonicalize(&joined);
+                    for parent in joined.ancestors().skip(1).take(to.components().count()) {
+                        if contains_dir(parent) {
+                            return false;
+                        }
+                    }
+                    true
+                };
+                outside()
+            };
+
+            if outside && !settings.allow_outside {
+                return Some(SymlinkError::OutsidePackage(entry.pkg_path.clone(), to.clone()));
+            }
+        }
+        None
+    })
+    .collect();
+
+    if !errs.is_empty() {
+        for e in &errs {
+            println!("Error: {e}");
+        }
+        anyhow::bail!("invalid symlinks")
+    }
+
+    Ok(())
+}

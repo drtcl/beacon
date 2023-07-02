@@ -11,9 +11,12 @@ impl App {
             Some(("available", sub_matches)) => {
                 let exact = *sub_matches.get_one::<bool>("exact").unwrap();
                 let json = *sub_matches.get_one::<bool>("json").unwrap();
+                let oneline = *sub_matches.get_one::<bool>("oneline").unwrap();
                 let name = sub_matches.get_one::<String>("pkg");
                 let provider_filter = args::parse_providers(sub_matches);
-                self.list_available_cmd(name, exact, json, provider_filter)?;
+                let channels = args::pull_many_opt(sub_matches, "channels");
+                let limit = *sub_matches.get_one::<u32>("limit").unwrap();
+                self.list_available_cmd(name, exact, oneline, json, provider_filter, channels, limit)?;
             }
             Some(("channels", sub_matches)) => {
                 let provider_filter = args::parse_providers(sub_matches);
@@ -85,7 +88,15 @@ impl App {
     }
 
     /// list all versions of all packages that are available
-    pub fn list_available_cmd(&mut self, needle: Option<&String>, exact: bool, json: bool, provider_filter: provider::ProviderFilter) -> Result<()> {
+    pub fn list_available_cmd(&mut self,
+        needle: Option<&String>,
+        exact: bool,
+        oneline: bool,
+        json: bool,
+        provider_filter: provider::ProviderFilter,
+        channels: Option<Vec<&String>>,
+        limit: u32
+    ) -> Result<()> {
 
         let mut combined = search::PackageList::new();
         for provider in provider_filter.filter(&self.config.providers) {
@@ -94,84 +105,87 @@ impl App {
             }
         }
 
-        if json {
-
-            //let js = serde_json::json!(combined);
-            //println!("{}", js);
-
-            for (name, versions) in combined {
-
-                // skip any that do not match the required name
-                if let Some(needle) = needle && ((exact && &name != needle) || (!exact && !name.contains(needle))) {
-                    continue;
+        // limit to package names containing the search term (or exact matches)
+        if let Some(needle) = needle {
+            combined.retain(|pkg_name, _versions| {
+                if exact {
+                    pkg_name == needle
+                } else {
+                    pkg_name.contains(needle)
                 }
-
-                let mut sorted = Vec::new();
-                versions.keys().map(|v| version_compare::Version::from(v).unwrap()).collect_into(&mut sorted);
-                sorted.sort_by(|a, b| a.compare(b).ord().unwrap_or(a.as_str().cmp(b.as_str())));
-                sorted.reverse();
-
-                let mut json_versions = Vec::new();
-
-                for version in &sorted {
-                    if let Some(version_info) = versions.get(version.as_str()) {
-                        let mut json_channels = Vec::new();
-                        for channel in &version_info.channels {
-                            json_channels.push(channel.to_string());
-                        }
-
-                        json_versions.push(serde_json::json!((version.to_string(), json_channels)));
-                    }
-                }
-
-                sorted.clear();
-
-                let js = serde_json::json!({
-                    "package": name,
-                    "versions": json_versions,
-                });
-                println!("{}", js);
-            }
-
-        } else {
-            let mut stdout = std::io::stdout();
-            let mut sorted = Vec::new();
-
-            for (name, versions) in &combined {
-
-                // skip any that do not match the required name
-                if let Some(needle) = needle && ((exact && name != needle) || (!exact && !name.contains(needle))) {
-                    continue;
-                }
-
-                versions.keys().map(|v| version_compare::Version::from(v).unwrap()).collect_into(&mut sorted);
-                sorted.sort_by(|a, b| a.compare(b).ord().unwrap_or(a.as_str().cmp(b.as_str())));
-
-                write!(&mut stdout, "{}", name)?;
-                for version in &sorted {
-                    if let Some(version_info) = versions.get(version.as_str()) {
-                        write!(&mut stdout, " {}", version.as_str())?;
-                        for channel in &version_info.channels {
-                            write!(&mut stdout, " +{}", channel)?;
-                        }
-                    }
-                }
-
-                writeln!(&mut stdout)?;
-                sorted.clear();
-            }
+            });
         }
 
-        //for (name, versions) in &combined {
-        //    write!(&mut stdout, "{}", name)?;
-        //    for (version, version_info) in versions {
-        //        write!(&mut stdout, " {}", version)?;
-        //        for channel in &version_info.channels {
-        //            write!(&mut stdout, " +{}", channel)?;
-        //        }
-        //    }
-        //    write!(&mut stdout, "\n")?;
-        //}
+        // limit to only the specified channels
+        if let Some(channels) = channels {
+            combined.retain(|_pkg_name, versions| {
+                versions.retain(|version, info| {
+                    if !info.channels.is_empty() {
+                        for c in &info.channels {
+                            if channels.contains(&c) {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
+                !versions.is_empty()
+            });
+        }
+
+        for (name, versions) in &combined {
+            let mut sorted = Vec::new();
+            versions.into_iter().map(|(v, i)| (version::Version::new(&v), i)).collect_into(&mut sorted);
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // limit to N number of versions per package
+            let take = sorted.iter().rev().take(if limit > 0 { limit as usize } else { sorted.len() });
+
+            if oneline {
+
+                // foo 1.0.0 1.0.1-test +beta
+
+                print!("{name}");
+                for (version, info) in take {
+                    print!(" {}", version.as_str());
+                    for c in &info.channels {
+                        print!(" +{c}");
+                    }
+                }
+                println!();
+            } else if json {
+
+                // {"package":"foo","versions":[["1.0.0",[]],["1.0.1-test",["beta"]]]}
+
+                let mut json_versions = Vec::new();
+                for (version, info) in take {
+                    let mut json_channels = Vec::new();
+                    for channel in &info.channels {
+                        json_channels.push(channel.to_string());
+                    }
+
+                    json_versions.push(serde_json::json!((version.to_string(), json_channels)));
+                }
+                println!("{}", serde_json::json!({
+                    "package": name,
+                    "versions": json_versions,
+                }));
+            } else {
+
+                // foo
+                //   1.0.0
+                //   1.0.1-test beta
+
+                println!("{name}");
+                for (version, info) in take {
+                    print!("  {}", version.as_str());
+                    for c in &info.channels {
+                        print!(" {c}");
+                    }
+                    println!();
+                }
+            }
+        }
 
         Ok(())
     }

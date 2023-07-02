@@ -11,6 +11,7 @@ members = [
     "crates/hashdir",
     "crates/httpsearch",
     "crates/package",
+    "crates/version",
     "crates/walk_example",
     "crates/zstd_patch",
 ]

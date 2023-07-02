@@ -14,7 +14,7 @@ mod provider;
 mod search;
 mod source;
 mod app;
-mod version;
+//mod version;
 mod args;
 
 // TODO don't do this

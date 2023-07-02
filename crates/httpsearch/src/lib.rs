@@ -268,15 +268,15 @@ pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&st
     Ok(report.packages)
 }
 
-fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, link: &Link) {
+fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, dir_link: &Link) {
 
     let ret = PackageList::new();
 
-    trace!(url=link.url, "scanning package dir {}", pkg_name);
+    trace!(url=dir_link.url, "scanning package dir {}", pkg_name);
 
     // gather all links from this package dir
     let mut links = Vec::new();
-    if let Ok(url) = Url::parse(&link.url) {
+    if let Ok(url) = Url::parse(&dir_link.url) {
         match scrape_links_from(client, &url) {
             Ok(l) => { links = l; },
             Err(_) => { return; }
@@ -287,13 +287,13 @@ fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, link: 
     let (pkg_files, links) = split_links(links, is_pkg_link);
 
     // add all found packages to the report
-    for Link{text, url} in pkg_files {
-        if let Some((name, version)) = package::split_parts(&text) {
+    for pkg_link in pkg_files {
+        if let Some((name, version)) = package::split_parts(&pkg_link.text) {
             if name != pkg_name {
                 // this file doesn't belong in this dir
                 // this is a package file for a package with a different name
-                tracing::warn!("ignored package in wrong dir: {}", url);
-            } else if let Some((version, info)) = link.version_info() {
+                tracing::warn!("ignored package in wrong dir: {}", pkg_link.url);
+            } else if let Some((version, info)) = pkg_link.version_info() {
                 report.add_version(pkg_name, &version, info);
             }
         }
