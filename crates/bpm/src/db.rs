@@ -150,6 +150,16 @@ impl Db {
         }
     }
 
+    pub fn cache_unuse_all_versions(&mut self, pkg_name: &str) {
+        for file in self.cache_files.iter_mut() {
+            if let Some((name, _version)) = package::split_parts(&file.filename) {
+                if name == pkg_name {
+                    file.in_use = false;
+                }
+            }
+        }
+    }
+
     pub fn cache_set_in_use(&mut self, filename: &str, in_use: bool) {
         match self.cache_files.iter_mut().find(|e| e.filename == filename) {
             Some(ent) => {

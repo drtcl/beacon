@@ -96,6 +96,7 @@ pub fn get_cli() -> Command {
         )
         .subcommand(
             Command::new("query")
+                .subcommand_required(true)
                 .about("Query information about installed packages")
                 .subcommand(Command::new("owner").about("Query which package owns a local file")
                     .arg(arg!(<file> "The file to find the owner of"))

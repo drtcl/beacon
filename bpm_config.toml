@@ -7,7 +7,7 @@ retention = "14 days"
 
 [mount]
 TARGET = "${BPM}/../../crates/bpm/install/target"
-EXTENSIONS = "${BPM}/../../crates/bpm/install/extensions"
+TEST  = "${BPM}/../../crates/bpm/install/test"
 
 [providers]
 test1 = "http://localhost:8000/pkg/"

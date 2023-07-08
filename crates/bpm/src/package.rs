@@ -1,29 +1,29 @@
-use crate::AResult;
-use serde::Deserialize;
-use std::fs::File;
-use std::io::{Read, Seek};
-use std::path::PathBuf;
-use anyhow::Context;
-use bpmutil::*;
+//use crate::AResult;
+//use serde::Deserialize;
+//use std::fs::File;
+//use std::io::{Read, Seek};
+//use std::path::PathBuf;
+//use anyhow::Context;
+//use bpmutil::*;
 
-fn semver_ser<S>(version: &semver::Version, s: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    s.serialize_str(&version.to_string())
-}
-
-fn semver_de<'de, D>(d: D) -> Result<semver::Version, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(d)?;
-    let ver = semver::Version::parse(&s);
-    if let Ok(ver) = ver {
-        return Ok(ver);
-    }
-    Ok(semver::Version::new(1, 2, 3))
-}
+//fn semver_ser<S>(version: &semver::Version, s: S) -> Result<S::Ok, S::Error>
+//where
+//    S: serde::Serializer,
+//{
+//    s.serialize_str(&version.to_string())
+//}
+//
+//fn semver_de<'de, D>(d: D) -> Result<semver::Version, D::Error>
+//where
+//    D: serde::Deserializer<'de>,
+//{
+//    let s = String::deserialize(d)?;
+//    let ver = semver::Version::parse(&s);
+//    if let Ok(ver) = ver {
+//        return Ok(ver);
+//    }
+//    Ok(semver::Version::new(1, 2, 3))
+//}
 
 //#[derive(Clone, Debug, Serialize, Deserialize)]
 //pub struct PackageID {
@@ -134,65 +134,65 @@ where
 //    Ok(sum)
 //}
 
-pub fn check_datachecksum(metadata: &package::MetaData, pkg_file: &mut File) -> AResult<bool> {
+//pub fn check_datachecksum(metadata: &package::MetaData, pkg_file: &mut File) -> AResult<bool> {
+//
+//    //let described_sum = get_datachecksum(pkg_file)?;
+//    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
+//
+//    pkg_file.rewind()?;
+//    let mut tar = tar::Archive::new(pkg_file);
+//    let mut data = package::seek_to_tar_entry("data.tar.zst", &mut tar)?;
+//
+//    let computed_sum = blake3_hash_reader(&mut data)?;
+//    let matches = &computed_sum == described_sum;
+//    tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
+//
+//    Ok(matches)
+//}
 
-    //let described_sum = get_datachecksum(pkg_file)?;
-    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
+//pub fn name_parts(name: &str) -> Option<(&str, semver::Version)> {
+//
+//    if !name.ends_with(package::DOTTED_PKG_FILE_EXTENSION) {
+//        return None;
+//    }
+//
+//    let name = name.strip_suffix(package::DOTTED_PKG_FILE_EXTENSION).unwrap();
+//    let mut split = name.split('-');
+//
+//    let pkg_name = split.next();
+//    let version = split.next();
+//    if split.next().is_some() {
+//        return None;
+//    }
+//
+//    //dbg!(&name);
+//    //dbg!(&pkg_name);
+//    //dbg!(&version);
+//
+//    match (pkg_name, version) {
+//        (Some(name), Some(ver_str)) => {
+//            if let Ok(ver) = semver::Version::parse(ver_str) {
+//                Some((name, ver))
+//            } else {
+//                None
+//            }
+//        }
+//        _ => None,
+//    }
+//}
 
-    pkg_file.rewind()?;
-    let mut tar = tar::Archive::new(pkg_file);
-    let mut data = package::seek_to_tar_entry("data.tar.zst", &mut tar)?;
+///// check if a package file name is formed correctly
+///// must be `{PKG_NAME}-{SEMVER}.bpm.tar`
+/////
+//pub fn named_properly(name: &str) -> bool {
+//    name_parts(name).is_some()
+//}
 
-    let computed_sum = blake3_hash_reader(&mut data)?;
-    let matches = &computed_sum == described_sum;
-    tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
+//pub fn to_filename(pkg_name: &str, version: &semver::Version) -> String {
+    //format!("{pkg_name}-{version}.bpm.tar")
+//}
 
-    Ok(matches)
-}
-
-pub fn name_parts(name: &str) -> Option<(&str, semver::Version)> {
-
-    if !name.ends_with(package::DOTTED_PKG_FILE_EXTENSION) {
-        return None;
-    }
-
-    let name = name.strip_suffix(package::DOTTED_PKG_FILE_EXTENSION).unwrap();
-    let mut split = name.split('-');
-
-    let pkg_name = split.next();
-    let version = split.next();
-    if split.next().is_some() {
-        return None;
-    }
-
-    //dbg!(&name);
-    //dbg!(&pkg_name);
-    //dbg!(&version);
-
-    match (pkg_name, version) {
-        (Some(name), Some(ver_str)) => {
-            if let Ok(ver) = semver::Version::parse(ver_str) {
-                Some((name, ver))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// check if a package file name is formed correctly
-/// must be `{PKG_NAME}-{SEMVER}.bpm.tar`
-///
-pub fn named_properly(name: &str) -> bool {
-    name_parts(name).is_some()
-}
-
-pub fn to_filename(pkg_name: &str, version: &semver::Version) -> String {
-    format!("{pkg_name}-{version}.bpm.tar")
-}
-
-pub fn to_filepath(mut dir: PathBuf, pkg_name: &str, version: &semver::Version) -> PathBuf {
-    dir.push(to_filename(pkg_name, version));
-    dir
-}
+//pub fn to_filepath(mut dir: PathBuf, pkg_name: &str, version: &semver::Version) -> PathBuf {
+//    dir.push(to_filename(pkg_name, version));
+//    dir
+//}

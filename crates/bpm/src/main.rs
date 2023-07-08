@@ -14,23 +14,16 @@ mod provider;
 mod search;
 mod source;
 mod app;
-//mod version;
 mod args;
-
-// TODO don't do this
-#[path = "package.rs"]
-mod pkg;
 
 use anyhow::Context;
 use anyhow::Result as AResult;
-//use package::PackageID;
-//use semver::Version;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use std::io::Seek;
 use std::io::Write;
 use std::iter::Iterator;
 use std::path::{Path, PathBuf};
-use camino::{Utf8Path, Utf8PathBuf};
 use version::Version;
 
 use crate::app::*;
@@ -63,49 +56,46 @@ fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
 //}
 
 /// search for the config file
-/// 1. config.toml next to the executable
-/// 2. (TODO) user home config dir?
-/// 3. bpm_config.toml in any parent dir from executable
-/// N. Current directory config.toml (TODO remove this)
+/// 1. bpm_config.toml next to the executable
+/// 2.     config.toml next to the executable
+/// 3. bpm_config.toml in user's config dir
+/// 4. bpm_config.toml in any parent dir from executable
 fn find_config_file() -> AResult<PathBuf> {
 
-    let path = std::env::current_exe()?.with_file_name("config.toml");
+    // bpm_config.toml next to executable
+    let mut path = std::env::current_exe()?.with_file_name("bpm_config.toml");
     if path.is_file() {
         return Ok(path);
     }
 
-    let mut path = Some(std::env::current_exe()?.with_file_name("bpm_config.toml"));
-    while let Some(trial) = path {
-        if trial.is_file() {
-            return Ok(trial);
+    // config.toml next to executable
+    path.set_file_name("config.toml");
+    if path.is_file() {
+        return Ok(path);
+    }
+
+    // bpm_config.toml in user's config dir
+    if let Some(base) = directories::BaseDirs::new() {
+        let config_dir = base.config_local_dir();
+        let path = config_dir.join("bpm_config.toml");
+        if path.is_file() {
+            return Ok(path);
         }
-
-        path = trial.parent().unwrap().parent().map(|p| join_path!(p, "bpm_config.toml"));
     }
 
-    let path = join_path!(std::env::current_dir()?, "config.toml");
-    if path.is_file() {
-        return Ok(path);
+    // any bpm_config.toml in a parent dir
+    let path = std::env::current_exe().context("failed to get current exe")?;
+    for dir in path.ancestors().skip(1) {
+        let path = dir.join("bpm_config.toml");
+        if path.is_file() {
+            return Ok(path);
+        }
     }
-    Err(anyhow::anyhow!("cannot find config.toml"))
+
+    Err(anyhow::anyhow!("cannot find config file"))
 }
 
 fn main() -> AResult<()> {
-
-//    //---
-//    let r = humantime::parse_duration("2d30s1ms");
-//    dbg!(&r);
-//    let d = r?;
-//    let d = std::time::Duration::from_secs(d.as_secs());
-//    let d = humantime::format_duration(d);
-//    println!("{}", d.to_string());
-//
-//    let now = chrono::Utc::now();
-//    let then = now + chrono::Duration::seconds(120) + chrono::Duration::milliseconds(123);
-//    let dur = then - now;
-//    let d = humantime::format_duration(dur.to_std()?);
-//    println!("{}", d.to_string());
-//    //---
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .without_time()
@@ -123,7 +113,7 @@ fn main() -> AResult<()> {
 
     // load the config file
     let mut app = App {
-        config: config::Config::from_path(config_file)?,
+        config: config::Config::from_path(config_file).context("reading config file")?,
         db: db::Db::new(),
         db_loaded: false,
     };
@@ -229,9 +219,24 @@ fn main() -> AResult<()> {
             }
         }
         _ => {
-            todo!("NYI");
+            unreachable!();
         }
     }
 
     Ok(())
 }
+
+//    //---
+//    let r = humantime::parse_duration("2d30s1ms");
+//    dbg!(&r);
+//    let d = r?;
+//    let d = std::time::Duration::from_secs(d.as_secs());
+//    let d = humantime::format_duration(d);
+//    println!("{}", d.to_string());
+//
+//    let now = chrono::Utc::now();
+//    let then = now + chrono::Duration::seconds(120) + chrono::Duration::milliseconds(123);
+//    let dur = then - now;
+//    let d = humantime::format_duration(dur.to_std()?);
+//    println!("{}", d.to_string());
+//    //---

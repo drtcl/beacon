@@ -145,11 +145,15 @@ fn main() -> Result<()> {
             subcmd_test_ignore(matches)?;
             std::process::exit(0);
         },
+        Some(("set-version", matches)) => {
+            subcmd_set_version(matches)?;
+            std::process::exit(0);
+        },
         Some(_) => {
             unreachable!();
         }
         None => {
-            main_make_package(&matches)?;
+            make_package(&matches)?;
         }
     }
 
@@ -312,6 +316,75 @@ fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<G
     file_list
 }
 
+fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
+
+    let require_semver = *matches.get_one::<bool>("semver").unwrap();
+    let package_version = Version::new(matches.get_one::<String>("version").unwrap());
+    let package_filepath = matches.get_one::<String>("pkgfile").unwrap();
+    let package_filepath = Utf8PathBuf::from_path_buf(PathBuf::from(package_filepath)).expect("failed to get file path");
+    let package_filename = package_filepath.file_name().context("failed to get filename")?;
+
+    if !package::is_version_string(&package_version) {
+        anyhow::bail!("invalid version")
+    }
+    if require_semver && !package_version.is_semver() {
+        anyhow::bail!("Version is not a valid semver. A valid semver is required because the --semver option was used")
+    }
+
+    if !package_filepath.try_exists().unwrap_or(false) {
+        anyhow::bail!("no such file");
+    }
+
+    if let Some((name, _version)) = package::split_parts(package_filename) {
+
+        //if _version != "unversioned" {
+            //anyhow::bail!("refusing to set the version of an already versioned package");
+        //}
+
+        let new_filename = package::make_packagefile_name(name, &package_version);
+        let new_filepath = package_filepath.with_file_name(&new_filename);
+
+        let out_file = std::fs::File::create(&new_filepath).context("failed to open file for writing")?;
+        let mut out_tar = tar::Builder::new(out_file);
+
+        let in_file = std::fs::File::open(package_filepath).context("failed to open file for reading")?;
+        let mut tar = tar::Archive::new(in_file);
+
+        for mut entry in tar.entries().context("failed to read tar")?.flatten() {
+            let path = entry.path()?.into_owned();
+
+            let path_str = path.to_str().context("failed to stringify path")?;
+            if path_str == package::META_FILE_NAME {
+
+                // extract the MetaData struct
+                let mut md = package::MetaData::from_reader(&mut entry).context("failed to extra metadata")?;
+
+                // update the version
+                md.version = package_version.to_string();
+
+                // re-serialize the struct and write that to the tar
+                let mut md_file = Vec::new();
+                md.to_writer(&mut md_file).context("failed to serialize metadata")?;
+
+                let mut header = entry.header().clone();
+                header.set_size(md_file.len() as u64);
+
+                out_tar.append_data(&mut header, path_str, std::io::Cursor::new(&md_file)).context("failed to write to tar")?;
+            } else {
+                let header = entry.header().clone();
+                out_tar.append(&header, &mut entry).context("failed to write to tar tar")?;
+            }
+        }
+
+        // finish the output file
+        let mut out_file = out_tar.into_inner()?;
+        out_file.flush()?;
+        drop(out_file);
+    }
+
+    Ok(())
+}
+
 fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
 
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
@@ -381,7 +454,7 @@ fn subcmd_list_files(file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
+fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
     let verbose = *matches.get_one::<bool>("verbose").unwrap();
@@ -420,14 +493,21 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
         anyhow::bail!("invalid package name. (must match [a-zA-Z][a-zA-Z0-9\\-]*)")
     }
 
+    let unversioned = *matches.get_one::<bool>("unversioned").unwrap();
+
     // the version must be of the right semver format
-    let package_version = Version::new(matches.get_one::<String>("version").unwrap());
-    if !package::is_version_string(&package_version) {
-        anyhow::bail!("invalid version")
-    }
-    if require_semver && !package_version.is_semver() {
-        anyhow::bail!("Version is not a valid semver. A valid semver is required because the --semver option was used")
-    }
+    let package_version = if unversioned {
+        Version::new("unversioned")
+    } else {
+        let package_version = Version::new(matches.get_one::<String>("version").unwrap());
+        if !package::is_version_string(&package_version) {
+            anyhow::bail!("invalid version")
+        }
+        if require_semver && !package_version.is_semver() {
+            anyhow::bail!("Version is not a valid semver. A valid semver is required because the --semver option was used")
+        }
+        package_version
+    };
 
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
     let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore);
@@ -462,21 +542,16 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     let data_tar_file = File::create(tarball_file_path.as_path())?;
     let data_tar_bufwriter = BufWriter::with_capacity(1024 * 1024, data_tar_file);
-    let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
-
-    //let data_tar_file = BufWriter::with_capacity(1024 * 1024, File::create(tarball_file_path.as_path())?);
-    //let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_file);
-    let mut data_tar_hasher = HashingWriter::new(&mut data_tar_compressed_size_writer, blake3::Hasher::new());
-    let mut data_tar_zstd = zstd::stream::write::Encoder::new(&mut data_tar_hasher, compress_level)?;
+    let data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
+    let data_tar_hasher = HashingWriter::new(data_tar_compressed_size_writer, blake3::Hasher::new());
+    let mut data_tar_zstd = zstd::stream::write::Encoder::new(data_tar_hasher, compress_level)?;
 
     #[cfg(feature="mt")]
     data_tar_zstd.multithread(get_threads())?;
 
-    let mut data_tar_zstd = data_tar_zstd.auto_finish();
+    let data_tar_uncompressed_size_writer = CountingWriter::new(data_tar_zstd);
 
-    let mut data_tar_uncompressed_size_writer = CountingWriter::new(&mut data_tar_zstd);
-
-    let mut data_tar_tar = tar::Builder::new(&mut data_tar_uncompressed_size_writer);
+    let mut data_tar_tar = tar::Builder::new(data_tar_uncompressed_size_writer);
     data_tar_tar.follow_symlinks(false);
 
     let mut meta = package::MetaData::new(package::PackageID {
@@ -596,27 +671,24 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
         pb.inc(1);
     }
 
-    // unwrap all the layers of writers
-
-    data_tar_tar.finish()?;
-    drop(data_tar_tar);
-
-    let uncompressed_size = data_tar_uncompressed_size_writer.count;
-
-    data_tar_zstd.flush()?;
-    drop(data_tar_zstd);
+    // unwrap all the layers of writers for the data tar file
+    let unc_counter = data_tar_tar.into_inner()?;
+    let uncompressed_size = unc_counter.count;
+    let zstd = unc_counter.into_inner();
+    let hasher = zstd.finish()?;
+    let (comp_counter, hasher) = hasher.into_parts();
+    let compressed_size = comp_counter.count;
+    let data_tar_hash = hasher.finalize().to_hex().to_string();
+    let bufwriter =  comp_counter.into_inner();
+    let mut file = bufwriter.into_inner()?;
+    file.flush()?;
+    drop(file);
 
     pb.finish_and_clear();
 
-    let (data_tar_compressed_size_writer, hasher) = data_tar_hasher.into_parts();
-
-    let compressed_size = data_tar_compressed_size_writer.count;
-
-    //let data_tar_hash = hex_string(hasher.finalize().as_slice());
-    let data_tar_hash = hasher.finalize().to_hex().to_string();
-    meta.data_hash = Some(data_tar_hash);
+    // fill in some more meta data and write the file
+    meta.data_hash = Some(data_tar_hash.clone());
     meta.mount = Some(mount.clone());
-
     {
         let mut metafile = BufWriter::new(File::create(&meta_file_path)?);
         meta.to_writer(&mut metafile)?;
@@ -625,26 +697,16 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
     // --- create a single tar package file ---
     let package_file = File::create(&package_file_path)?;
     let package_file = BufWriter::with_capacity(1024 * 1024, package_file);
-    let mut hasher = HashingWriter::new(package_file, blake3::Hasher::new());
-    let mut package_tar = tar::Builder::new(&mut hasher);
+    let hashing_writer = HashingWriter::new(package_file, blake3::Hasher::new());
+    let mut package_tar = tar::Builder::new(hashing_writer);
 
     package_tar.append_path_with_name(&meta_file_path, package::META_FILE_NAME)?;
     package_tar.append_path_with_name(&tarball_file_path, package::DATA_FILE_NAME)?;
-    package_tar.finish()?;
-    drop(package_tar);
+    let hashing_writer = package_tar.into_inner()?;
 
-    let package_size = hasher.count;
-
-    hasher.flush()?;
-    let (package_file, hasher) = hasher.into_parts();
-
-    println!();
-    println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
-    println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
-    println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
-    println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
-    println!("package hash [blake3]:  {}", hasher.finalize());
-
+    let package_size = hashing_writer.count;
+    let (package_file, hasher) = hashing_writer.into_parts();
+    let package_hash = hasher.finalize();
     package_file.into_inner()?.sync_all()?;
 
     // cleanup
@@ -654,6 +716,12 @@ fn main_make_package(matches: &clap::ArgMatches) -> Result<()> {
         std::fs::remove_file(tarball_file_path.as_path())?;
     }
 
+    println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
+    println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
+    println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
+    println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
+    println!("data hash [blake3]:     {}", data_tar_hash);
+    println!("package hash [blake3]:  {}", package_hash);
     println!("Package created at {}", std::fs::canonicalize(package_file_path.as_path())?.display());
 
     Ok(())
@@ -669,7 +737,6 @@ fn canonicalize_no_symlink(path: &Utf8Path) -> Result<Utf8PathBuf> {
 
     Ok(path.canonicalize_utf8()?)
 }
-
 
 struct HashingReader<Inner, Hasher> {
     inner: Inner,
@@ -697,6 +764,7 @@ impl<Inner, Hasher> HashingReader<Inner, Hasher> {
     }
 }
 
+#[derive(Debug)]
 struct CountingWriter<W: Write> {
     inner: W,
     count: u64,
@@ -706,6 +774,9 @@ impl<W: Write> CountingWriter<W> {
     fn new(w: W) -> Self {
         Self { inner: w, count: 0}
     }
+    fn into_inner(self) -> W {
+        self.inner
+    }
 }
 
 impl<W: Write> std::io::Write for CountingWriter<W> {
@@ -713,7 +784,6 @@ impl<W: Write> std::io::Write for CountingWriter<W> {
         let ret = self.inner.write(data);
         if let Ok(n) = ret {
             self.count += n as u64;
-            //println!("{:p} count {}", self, self.count);
         }
         ret
     }
@@ -722,6 +792,7 @@ impl<W: Write> std::io::Write for CountingWriter<W> {
     }
 }
 
+#[derive(Debug)]
 struct HashingWriter<Inner, Hasher> {
     inner: Inner,
     hasher: Hasher,
@@ -744,32 +815,17 @@ impl<Inner: Write, Hasher: Write> std::io::Write for HashingWriter<Inner, Hasher
 
 impl<Inner, Hasher> HashingWriter<Inner, Hasher> {
     fn new(inner: Inner, hasher: Hasher) -> Self {
-        Self { inner, hasher, count: 0 }
+        Self {
+            inner,
+            hasher,
+            count: 0,
+        }
     }
     fn into_parts(self) -> (Inner, Hasher) {
         (self.inner, self.hasher)
     }
 }
 
-//fn normalize_path(path: PathBuf) -> PathBuf {
-//    let mut ret = PathBuf::new();
-//    for i in path.iter() {
-//        dbg!(&i);
-//        if i == ".." {
-//            ret.pop();
-//        } else if i == "." {
-//        } else {
-//            ret.push(i);
-//        }
-//    }
-//    dbg!(&ret);
-//    ret
-//}
-
-// symlinks could:
-// * point outside of the package
-// * point to non-existent files
-// * point to absolute paths
 fn partial_canonicalize(path: &Utf8Path) -> Utf8PathBuf {
     for parent in path.ancestors().skip(1) {
         //println!("ancestor {} exists {:?}", parent, parent.try_exists());
@@ -816,6 +872,10 @@ struct SymlinkSettings {
     allow_dne: bool,
 }
 
+// symlinks could:
+// * point outside of the package
+// * point to non-existent files
+// * point to absolute paths
 fn verify_symlinks(settings: &SymlinkSettings, listing: &FileListing) -> Result<()> {
 
     // a filter over files that removes ignored files

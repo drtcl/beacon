@@ -38,7 +38,7 @@ impl App {
     pub fn list_installed(&mut self) -> Result<()> {
 
         // if the db file doesn't exist, dont' attempt to load it, return 0 packages
-        if !self.config.db_file.exists() {
+        if !self.db_file_exists() {
             return Ok(());
         }
 

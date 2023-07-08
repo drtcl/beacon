@@ -63,6 +63,11 @@ impl App {
         Ok(())
     }
 
+    pub fn db_file_exists(&self) -> bool {
+        let path = Path::new(&self.config.db_file);
+        path.try_exists().unwrap_or(false)
+    }
+
     pub fn create_load_db(&mut self) -> AResult<()> {
 
         tracing::trace!("loading database");
@@ -159,12 +164,12 @@ impl App {
 
         let pkg_name;
         let pkg_version;
-        match pkg::name_parts(package_file_filename) {
-            Some((n, v)) => {
+        match (package::is_packagefile_name(&package_file_filename), package::split_parts(package_file_filename)) {
+            (true, Some((n, v))) => {
                 pkg_name = n;
                 pkg_version = v;
             }
-            None => {
+            _ => {
                 anyhow::bail!("package name is invalid");
             }
         }
@@ -217,11 +222,6 @@ impl App {
             }
         }
 
-        //let mut details = db::DbPkg::new(PackageID {
-        //    name: String::from(pkg_name),
-        //    version: pkg_version.to_string(),
-        //});
-
         let mut details = db::DbPkg::new(metadata);
         details.location = install_dir.into();
         details.versioning = versioning;
@@ -230,7 +230,9 @@ impl App {
         self.db.add_package(details);
 
         self.db.cache_touch(package_file_filename);
+        self.db.cache_unuse_all_versions(pkg_name);
         self.db.cache_set_in_use(package_file_filename, true);
+
         self.save_db()?;
 
         Ok(())
@@ -508,6 +510,11 @@ impl App {
     }
 
     pub fn update_packages_cmd(&mut self, pkgs: &[&String]) -> AResult<()> {
+
+        // nothing to do if the db file doesn't exist yet, nothing to update
+        if !self.db_file_exists() {
+            return Ok(());
+        }
 
         self.load_db()?;
 

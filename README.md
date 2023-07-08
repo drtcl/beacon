@@ -172,18 +172,13 @@ Packages can also just be put into channel directories. The directory name start
 
 Multiple versions *can* be specified for a channel, but only the *greatest* version is ever used by bpm. Older versions can be left in the file for your own history or for information for other tools using bpm.
 
-### Special Versions
-- [ ] TODO
-
-Special versions can be used when installing a package
-
-    bpm install foo@stable
-
-- latest or latestcurrent -- latest non-beta version
-- latestbeta -- latest beta version
-- latestcurrentorbeta -- latest current or beta version
-
 ## Creating a Package
+
     # create foo-1.2.3.bpm from files at files/foo
     bpmpack --name foo -version 1.2.3 --mount TARGET files/foo
+
+    # Packages can be created without knowing the version at creation time
+    bpmpack --name foo --unversioned --mount TARGET files/foo
+    # and then repackaged with a version later.
+    bpmpack set-version --version 3.1.4 foo_unversioned.bpm
 

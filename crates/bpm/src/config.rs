@@ -61,7 +61,7 @@ impl Config {
         let toml = {
             let mut contents = String::new();
             read.read_to_string(&mut contents)?;
-            toml::from_str::<ConfigToml>(&contents).context("failed to parse config.toml")?
+            toml::from_str::<ConfigToml>(&contents).context("failed to parse config")?
         };
 
         let cache_dir = Utf8PathBuf::from(path_replace(toml.cache.dir));

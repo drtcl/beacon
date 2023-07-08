@@ -33,9 +33,10 @@ walkdir = { workspace = true }
 zstd = { workspace = true, features = ["zstdmt"]}
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
+directories = "5.0.1"
+humantime = "2.1.0"
 itertools = "0.10.5"
 version-compare = "0.1.1"
-humantime = "2.1.0"
 
 [features]
 default = []
