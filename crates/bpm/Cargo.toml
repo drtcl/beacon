@@ -14,6 +14,7 @@ fssearch   = { path = "../fssearch" }
 httpsearch = { path = "../httpsearch" }
 package    = { path = "../package" }
 version    = { path = "../version" }
+bpmpack    = { path = "../bpmpack", optional=true }
 
 anyhow = { workspace = true }
 blake3 = { workspace = true }
@@ -39,4 +40,5 @@ itertools = "0.10.5"
 version-compare = "0.1.1"
 
 [features]
-default = []
+default = ["pack"]
+pack = ["dep:bpmpack"]

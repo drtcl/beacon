@@ -3,6 +3,12 @@ name = "bpmpack"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "bpmpack"
+
+[[bin]]
+name = "bpmpack"
+
 [lints]
 workspace = true
 

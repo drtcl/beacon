@@ -1,11 +1,17 @@
 use clap::{Command, arg, Arg, ArgAction};
 
-pub fn get_args() -> clap::Command {
+pub fn get_cli() -> clap::Command {
 
-    clap::Command::new("bpm-pack")
-        .version("0.1.0")
-        .about("Bryan's Package Manager : bpm-pack : package creation utility")
-        .author("Bryan Splitgerber")
+    build_cli(
+        clap::Command::new("bpm-pack")
+            .about("Bryan's Package Manager : bpm-pack : package creation utility")
+            .author("Bryan Splitgerber")
+    )
+}
+
+pub fn build_cli(cmd: clap::Command) -> clap::Command {
+
+    cmd.version("0.1.0")
         .disable_version_flag(true)
         .subcommand_negates_reqs(true)
         .args_conflicts_with_subcommands(true)
@@ -20,9 +26,9 @@ pub fn get_args() -> clap::Command {
                 .arg(arg!(--semver "Require the version to be a valid semver [see http://semver.org]"))
         )
         .subcommand(
-            Command::new("list")
-                .alias("list-files")
-                .about("list files of a package")
+            Command::new("list-files")
+                .alias("list")
+                .about("list the files contained in a package file")
                 .arg(arg!(<pkgfile> "package file to inspect"))
         )
         .subcommand(

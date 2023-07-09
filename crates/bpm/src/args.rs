@@ -24,20 +24,27 @@ fn providers_arg() -> clap::Arg {
 
 pub fn get_cli() -> Command {
 
-    Command::new("bpm")
+    let cli = Command::new("bpm")
         .version("0.1.0")
         .about("bpm : A simple, generic, general-purpose package manager")
         .author("Bryan Splitgerber")
         .arg(arg!(-c --config <file> "use a specific config file"))
         .subcommand_required(true)
         .subcommand(
+            Command::new("scan")
+                .about("Scan providers, updating provider package list caches")
+                .arg(arg!(--debounce <time> "Do not scan agian if last scan was within the given time"))
+                .arg(providers_arg())
+        )
+        .subcommand(
             Command::new("search")
-                .about("search for packages")
+                .about("Search for packages")
                 .arg(arg!(<pkg> "(partial) package name to search for"))
                 .arg(arg!(--exact "match package name exactly"))
         )
         .subcommand(
             Command::new("list")
+                .about("List installed or available packages")
                 .subcommand(Command::new("installed").about("list currently installed packages"))
                 .subcommand(Command::new("available").about("list available packages")
                     .alias("avail")
@@ -65,14 +72,8 @@ pub fn get_cli() -> Command {
                 )
         )
         .subcommand(
-            Command::new("scan")
-                .about("scan providers, update provider package list caches")
-                .arg(arg!(--debounce <time> "Do not scan agian if last scan was within the given time"))
-                .arg(providers_arg())
-        )
-        .subcommand(
             Command::new("install")
-                .about("install new packages")
+                .about("Install new packages")
                 .arg(arg!(<pkg> "package name or path to local package file"))
                 .arg(arg!(--"no-pin" "Do not pin to a specific version. Package may immediately be a candidate for updating."))
         )
@@ -84,16 +85,22 @@ pub fn get_cli() -> Command {
         )
         .subcommand(
             Command::new("update")
-                .about("update packages")
+                .about("Update packages")
                 .arg(arg!([pkg]... "package name or path to local package file"))
         )
         .subcommand(
             Command::new("verify")
-                .about("perform consistency check on package state")
+                .about("Perform consistency check on package state")
                 .arg(arg!([pkg]... "Package name(s) to verify. If no package is specified, verify all."))
                 .arg(arg!(--restore "Restore files that have been modified to original installation state"))
                 .arg(arg!(-v --verbose "Ouput extra information"))
         )
+        //TODO
+        //.subcommand(
+            //Command::new("restore")
+                //.about("Restore modified files within a package to original installation state")
+                //.arg(arg!(--volatile "also restore volatile files"))
+        //)
         .subcommand(
             Command::new("query")
                 .subcommand_required(true)
@@ -131,6 +138,12 @@ pub fn get_cli() -> Command {
         //.subcommand(
         //    Command::new("inspect")
         //)
+        //.subcommand(
+        //    Command::new("info")
+        //        .about("show detailed info about a package")
+        //        .arg(arg!(<pkg> "package name or path to local package file"))
+        //        .arg(arg!(--channels "list channels the given package"))
+        //)
         .subcommand(
             Command::new("cache").about("cache management")
                 .subcommand(
@@ -148,15 +161,14 @@ pub fn get_cli() -> Command {
                         .about("Fetch a package and store it in the cache")
                         .arg(arg!(<pkg>... "Package name(s) to fetch"))
                 )
+        );
+
+    #[cfg(feature = "pack")]
+    let cli = cli.subcommand(
+        bpmpack::args::build_cli(Command::new("pack")
+            .about("Bundled bpm-pack utils. Create packages.")
         )
-        .subcommand(
-            Command::new("info")
-                .about("show detailed info about a package")
-                .arg(arg!(<pkg> "package name or path to local package file"))
-                .arg(arg!(--channels "list channels the given package"))
-        )
-        //.subcommand(
-        //    Command::new("pack")
-        //        .about("packaged bpm-pack utils")
-        //)
+    );
+
+    cli
 }

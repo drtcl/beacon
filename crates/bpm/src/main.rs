@@ -107,6 +107,16 @@ fn main() -> AResult<()> {
 
     let matches = args::get_cli().get_matches();
 
+    // shortcut to bpm-pack, no config file needed
+    #[cfg(feature = "pack")]
+    match matches.subcommand() {
+        Some(("pack", matches)) => {
+            return bpmpack::cli_main(matches);
+        }
+        _ => {}
+    }
+
+    // find the config file
     let config_file = matches.get_one::<String>("config");
     let config_file = config_file.map_or_else(find_config_file, |s| Ok(PathBuf::from(s)))?;
     tracing::trace!("using config file {}", config_file.display());
