@@ -464,12 +464,6 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // - data - all target file in the package
     // - meta - meta data about data files
 
-    let mut tarball_file_path = PathBuf::from(&output_dir);
-    tarball_file_path.push(package::DATA_FILE_NAME);
-
-    let mut meta_file_path = PathBuf::from(&output_dir);
-    meta_file_path.push(package::META_FILE_NAME);
-
     let mut package_file_path = PathBuf::from(&output_dir);
     package_file_path.push(package::make_packagefile_name(package_name, package_version.as_str()));
 
@@ -488,7 +482,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // 6. CountingWriter (for uncompressed size)
     // 7. tar builder
 
-    let data_tar_file = File::create(tarball_file_path.as_path())?;
+    let data_tar_file = tempfile::Builder::new().prefix(&format!("{}.{}.temp", package_name, package::DATA_FILE_NAME)).tempfile_in(&output_dir)?;
     let data_tar_bufwriter = BufWriter::with_capacity(1024 * 1024, data_tar_file);
     let data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
     let data_tar_hasher = HashingWriter::new(data_tar_compressed_size_writer, blake3::Hasher::new());
@@ -614,6 +608,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         meta.add_file(entry.pkg_path, package::FileInfo {
             hash: entry.hash,
             filetype: entry.file_type.into(),
+            mtime: None,
         });
 
         pb.inc(1);
@@ -630,17 +625,17 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let bufwriter =  comp_counter.into_inner();
     let mut file = bufwriter.into_inner()?;
     file.flush()?;
-    drop(file);
+    //drop(file);
+    let mut data_tar_file = file;
 
     pb.finish_and_clear();
 
     // fill in some more meta data and write the file
     meta.data_hash = Some(data_tar_hash.clone());
     meta.mount = Some(mount.clone());
-    {
-        let mut metafile = BufWriter::new(File::create(&meta_file_path)?);
-        meta.to_writer(&mut metafile)?;
-    }
+    let mut metafile = tempfile::Builder::new().prefix(&format!("{}.{}.temp", package_name, package::META_FILE_NAME)).tempfile_in(&output_dir)?;
+    meta.to_writer(&mut metafile)?;
+    metafile.flush()?;
 
     // --- create a single tar package file ---
     let package_file = File::create(&package_file_path)?;
@@ -648,8 +643,24 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let hashing_writer = HashingWriter::new(package_file, blake3::Hasher::new());
     let mut package_tar = tar::Builder::new(hashing_writer);
 
-    package_tar.append_path_with_name(&meta_file_path, package::META_FILE_NAME)?;
-    package_tar.append_path_with_name(&tarball_file_path, package::DATA_FILE_NAME)?;
+    // metadata file
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata_in_mode(
+        &metafile.as_file().metadata().context("getting metadata")?,
+        tar::HeaderMode::Complete
+    );
+    metafile.seek(std::io::SeekFrom::Start(0)).context("seeking in metadata")?;
+    package_tar.append_data(&mut header, package::META_FILE_NAME, &mut metafile)?;
+
+    // data file
+    let mut header = tar::Header::new_gnu();
+    header.set_metadata_in_mode(
+        &data_tar_file.as_file().metadata().context("getting metadata")?,
+        tar::HeaderMode::Complete
+    );
+    data_tar_file.seek(std::io::SeekFrom::Start(0)).context("seeking in metadata")?;
+    package_tar.append_data(&mut header, package::DATA_FILE_NAME, &mut data_tar_file)?;
+
     let hashing_writer = package_tar.into_inner()?;
 
     let package_size = hashing_writer.count;
@@ -659,9 +670,9 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     // cleanup
     // the important files are now in the package tarball, can cleanup the intermediate ones
-    if !matches.get_one::<bool>("no-cleanup").unwrap() {
-        std::fs::remove_file(meta_file_path.as_path())?;
-        std::fs::remove_file(tarball_file_path.as_path())?;
+    if *matches.get_one::<bool>("no-cleanup").unwrap() {
+        let _ = metafile.keep();
+        let _ = data_tar_file.keep();
     }
 
     println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);

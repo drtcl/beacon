@@ -50,11 +50,6 @@ pub enum FileType {
     Dir,
     File,
     Link(String),
-    //Link(Utf8PathBuf), //TODO ?
-    //Link{
-    //    //#[serde(rename="link")]
-    //    to: String
-    //},
 }
 
 impl FileType {
@@ -66,7 +61,12 @@ impl FileType {
     }
     pub fn is_link(&self) -> bool {
         matches!(self, FileType::Link(_to))
-        //matches!(self, FileType::Link{to})
+    }
+    pub fn get_link(&self) -> Option<String> {
+        match self {
+            FileType::Link(to) => Some(to.clone()),
+            _ => None
+        }
     }
 }
 
@@ -80,6 +80,10 @@ pub struct FileInfo {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mtime: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -109,23 +113,31 @@ pub struct MetaData {
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 struct FileInfoString(String);
+// strings look like this:
+// d
+// f:hash:mtime
+// s:link_to:hash
 
 impl From<FileInfo> for FileInfoString {
     fn from(info: FileInfo) -> Self {
         let mut ret = String::new();
-        match info.filetype {
+        match &info.filetype {
             FileType::Dir => ret.push_str(DIR_ATTR),
             FileType::File => ret.push_str(FILE_ATTR),
             FileType::Link(to) => {
-            //FileType::Link{to} => {
                 ret.push_str(SYMLINK_ATTR);
                 ret.push(':');
-                ret.push_str(&to);
+                ret.push_str(to);
             }
         }
         if let Some(hash) = info.hash {
             ret.push(':');
             ret.push_str(&hash);
+        }
+        if info.filetype.is_file() {
+            if let Some(mtime) = info.mtime {
+                ret.push_str(&format!(":{mtime}"))
+            }
         }
         Self(ret)
     }
@@ -143,7 +155,6 @@ impl TryFrom<FileInfoString> for FileInfo {
             Some(SYMLINK_ATTR) => {
                 let to = iter.next().map(str::to_owned);
                 to.map(FileType::Link)
-                //to.map(|s| FileType::Link{to: s})
             }
             Some(_) | None => None,
         };
@@ -152,9 +163,12 @@ impl TryFrom<FileInfoString> for FileInfo {
         }
 
         let hash = iter.next().map(str::to_owned);
+        let mtime = iter.next().and_then(|v| v.parse::<u64>().ok());
+
         let ret = Self {
             filetype: ft.unwrap(),
             hash,
+            mtime,
         };
 
         Ok(ret)
@@ -440,6 +454,7 @@ mod test {
             FileInfo {
                 filetype: FileType::Dir,
                 hash: None,
+                mtime: None,
             },
         );
         meta.add_file(
@@ -447,6 +462,7 @@ mod test {
             FileInfo {
                 filetype: FileType::File,
                 hash: Some("2ffac14".into()),
+                mtime: None,
             },
         );
         meta.add_file(
@@ -454,6 +470,7 @@ mod test {
             FileInfo {
                 filetype: FileType::File,
                 hash: Some("1aef313".into()),
+                mtime: None,
             },
         );
         meta.add_file(
@@ -461,6 +478,7 @@ mod test {
             FileInfo {
                 filetype: FileType::Link("a1.c".into()),
                 hash: Some("77af123".into()),
+                mtime: None,
             },
         );
 

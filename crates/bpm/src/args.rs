@@ -93,6 +93,7 @@ pub fn get_cli() -> Command {
                 .about("Perform consistency check on package state")
                 .arg(arg!([pkg]... "Package name(s) to verify. If no package is specified, verify all."))
                 .arg(arg!(--restore "Restore files that have been modified to original installation state"))
+                .arg(arg!(--mtime "Enable mtime verification"))
                 .arg(arg!(-v --verbose "Ouput extra information"))
         )
         //TODO

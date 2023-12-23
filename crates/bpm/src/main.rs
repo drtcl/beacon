@@ -197,12 +197,13 @@ fn main() -> AResult<()> {
 
             let verbose = *sub_matches.get_one::<bool>("verbose").unwrap();
             let restore = *sub_matches.get_one::<bool>("restore").unwrap();
+            let mtime   = *sub_matches.get_one::<bool>("mtime").unwrap();
 
             let pkg_names = sub_matches
                 .get_many::<String>("pkg")
                 .map_or(Vec::new(), |given| given.collect());
 
-            app.verify_cmd(&pkg_names, restore, verbose)?;
+            app.verify_cmd(&pkg_names, restore, verbose, mtime)?;
         }
         Some(("search", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();

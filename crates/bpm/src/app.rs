@@ -70,8 +70,6 @@ impl App {
 
     pub fn create_load_db(&mut self) -> AResult<()> {
 
-        tracing::trace!("loading database");
-
         let db_path = Path::new(&self.config.db_file);
         let exists = db_path
             .try_exists()
@@ -159,8 +157,7 @@ impl App {
 
         tracing::debug!("install_pkg_file {}", file_path);
 
-        let package_file_filename = file_path
-            .file_name().context("invalid filename")?;
+        let package_file_filename = file_path.file_name().context("invalid filename")?;
 
         let pkg_name;
         let pkg_version;
@@ -176,7 +173,7 @@ impl App {
 
         // open the package file and get the metadata
         let mut file = File::open(&file_path).context("failed to open package file")?;
-        let metadata = package::get_metadata(&mut file).context("error reading metadata")?;
+        let mut metadata = package::get_metadata(&mut file).context("error reading metadata")?;
 
         // make sure the checksum matches
         if !package::package_integrity_check(&mut file)? {
@@ -214,10 +211,23 @@ impl App {
         // unpack all files individually
         for entry in data_tar.entries()? {
             let mut entry = entry?;
-            let installed = entry.unpack_in(&install_dir)?;
-            //println!("unpacked entry {:?} {}", entry.path(), installed);
 
-            if !installed {
+            let installed_ok = entry.unpack_in(&install_dir)?;
+
+            let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
+            let installed_path = join_path_utf8!(&install_dir, &path);
+
+            // store the mtime
+            if let Some(info) = metadata.files.get_mut(&path) {
+                let header = entry.header();
+                let mut mtime = header.mtime().ok();
+                if mtime.is_none() {
+                    mtime = get_mtime(&installed_path);
+                }
+                info.mtime = mtime;
+            }
+
+            if !installed_ok {
                 tracing::error!("unpack skipped {:?}", entry.path());
             }
         }
@@ -311,21 +321,25 @@ impl App {
         {
             let path = Utf8Path::new(pkg_name);
             let filename = path.file_name();
-            if let Ok(true) = path.try_exists() && let Some(filename) = filename && package::is_packagefile_name(filename) {
+            if let Ok(true) = path.try_exists() {
+                tracing::trace!(path=?path, "install from file");
+                if let Some(filename) = filename && package::is_packagefile_name(filename) {
+                    tracing::trace!("installing directly from a package file {pkg_name}");
 
-                tracing::trace!("installing directly from a package file {pkg_name}");
+                    // TODO check that the package file is not a path to a file in the cache dir
+                    // (DO NOT COPY IN PLACE)
 
-                // TODO check that the package file is not a path to a file in the cache dir
-                // (DO NOT COPY IN PLACE)
+                    let cache_path = join_path_utf8!(&self.config.cache_dir, filename);
 
-                let cache_path = join_path_utf8!(&self.config.cache_dir, filename);
+                    // copy to the cache dir
+                    std::fs::copy(path, &cache_path).context("failed to copy package file")?;
 
-                // copy to the cache dir
-                std::fs::copy(path, &cache_path).context("failed to copy package file")?;
+                    //TODO sanity check file contents
 
-                //TODO sanity check file contents
-
-                return self.install_pkg_file(cache_path, Versioning::pinned_version());
+                    return self.install_pkg_file(cache_path, Versioning::pinned_version());
+                } else {
+                    anyhow::bail!("invalid package file")
+                }
             }
         }
 
@@ -591,10 +605,9 @@ impl App {
     /// For installed packages listed in the db,
     /// walk each file and hash the version we have on disk
     /// and compare that to the hash stored in the db.
-    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, verbose: bool) -> AResult<()>
+    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, verbose: bool, allow_mtime: bool) -> AResult<()>
         where S: AsRef<str>,
     {
-
         self.load_db()?;
 
         // all given names must be installed
@@ -626,54 +639,117 @@ impl App {
             let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
             for (filepath, fileinfo) in pkg.metadata.files.iter() {
 
-                if !fileinfo.filetype.is_file() {
-                    //vout!(verbose, "skipping non-file {}", filepath);
-                    continue;
-                }
+                let path = join_path_utf8!(&root_dir, filepath);
+                //println!("{}", path);
 
-                let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
+                let state = get_filestate(&path);
+                let mut modified = false;
 
-                let path = join_path!(&root_dir, filepath);
+                if fileinfo.filetype.is_dir() {
 
-                //vout!(verbose, "checking file at {path:?} for hash {db_hash}");
-
-                if !path.exists() {
-                    if restore {
-                        //vout!(verbose, "rD  -- {}", &filepath);
-                        restore_files.insert(filepath.clone());
-                    } else {
-                        vout!(verbose, " D  -- {}", &filepath);
+                    // as long as the path exists and it is a dir, then it is unmodified
+                    if state.missing || !state.dir {
+                        modified = true;
                     }
-                    continue;
+
+                } else if fileinfo.filetype.is_link() {
+
+                    if state.missing || !state.link {
+                        modified = true;
+                    } else {
+                        let db_link = fileinfo.filetype.get_link();
+                        let db_link = db_link.as_ref().map(Utf8Path::new);
+
+                        let fs_link = std::fs::read_link(&path);
+                        match fs_link {
+                            Err(_) => {
+                                println!("error: cannot read link {}", path);
+                                modified = true;
+                            }
+                            Ok(fs_link) => {
+                                match Utf8PathBuf::from_path_buf(fs_link) {
+                                    Err(path) => {
+                                        println!("error: invalid path, non-utf8, {}", path.display());
+                                        modified = true;
+                                    }
+                                    Ok(fs_link) => {
+                                        if db_link != Some(fs_link.as_path()) {
+                                            modified = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                } else if fileinfo.filetype.is_file() {
+
+                    if state.missing || !state.file {
+                        modified = true;
+                    } else {
+
+                        // path exists and it is a file
+                        // check mtime or hash
+
+                        let mut check_hash = true;
+
+                        if allow_mtime {
+                            let db_mtime = fileinfo.mtime;
+                            if db_mtime.is_some() {
+                                let fs_mtime = state.mtime;
+                                //println!("db_mtime {:?}", db_mtime);
+                                //println!("fs_mtime {:?}", fs_mtime);
+                                if fs_mtime.is_some() && db_mtime == fs_mtime {
+                                    //vout!(verbose, "  mtime same");
+                                    check_hash = false;
+                                }
+                            }
+                        }
+
+                        if check_hash {
+                            let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
+                            let file = File::open(&path)?;
+                            let reader = std::io::BufReader::new(file);
+                            let hash = blake3_hash_reader(reader)?;
+
+                            //println!("     path  {}", &filepath);
+                            //println!("  db_hash  {}", db_hash);
+                            //println!("     hash  {}", hash);
+
+                            if &hash != db_hash {
+                                modified = true;
+                            }
+                        }
+                    }
                 }
 
-                let file = File::open(&path)?;
-                let reader = std::io::BufReader::new(file);
-                let hash = blake3_hash_reader(reader)?;
-
-                if &hash == db_hash {
-                    vout!(verbose, "    -- {}", &filepath);
-                } else {
+                if modified {
                     pristine = false;
-                    if restore {
-                        //println!("rM  -- {}", &filepath);
-                        restore_files.insert(filepath.clone());
+                    if state.missing {
+                        println!(" deleted   {}", &filepath);
                     } else {
-                        //vout!(verbose, " M  -- {}", &filepath);
-                        println!(" M  -- {}", &filepath);
+                        println!(" modified  {}", &filepath);
                     }
+                    restore_files.insert(filepath.clone());
+                } else {
+                    vout!(verbose, "           {}", &filepath);
                 }
-
             }
 
-            if restore {
-                //println!("restore_files {:?}", restore_files);
+            println!("> {} -- {}", pkg.metadata.name, tern!(pristine, "OK", "MODIFIED"));
+
+            //println!("restore_files {:?}", restore_files);
+            if restore && !restore_files.is_empty() {
 
                 let path = self.cache_package_require(&PackageID{
                     name: pkg.metadata.name.clone(),
                     version: pkg.metadata.version.clone(),
                 }).context("could not find package file")?;
-                let cache_file = std::fs::File::open(path)?;
+                let cache_file = std::fs::File::open(path).context("reading cached package file")?;
+
+                // TODO potential to get a different package here
+                // Should check that the meta data and data hash are the same
+                // as the ones in the db (the installed version)
 
                 let mut outer_tar = tar::Archive::new(&cache_file);
                 let mut data_file = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut outer_tar)?;
@@ -687,7 +763,7 @@ impl App {
                     if let Some(xpath) = restore_files.take(&path) {
                         let _ok = ent.unpack(full_path);
                         //dbg!(_ok);
-                        println!(" R  -- {}", xpath);
+                        println!(" restored  {}", xpath);
                     }
 
                     // when there are no more files to restore, stop iterating the package
@@ -695,9 +771,9 @@ impl App {
                         break;
                     }
                 }
-            }
 
-            println!("> {} -- {}", pkg.metadata.name, tern!(pristine, "OK", "MODIFIED"));
+                println!("> {} -- {}", pkg.metadata.name, "RESTORED");
+            }
         }
 
         Ok(())
