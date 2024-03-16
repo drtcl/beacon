@@ -26,21 +26,24 @@
 //
 //  does this parent dirs: a, a/b, and a/b/c, need to be white listed and added to the data tar?
 
+//.progress_chars("█▇▆▅▄▃▂▁ █")
+
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use ignore::gitignore::Gitignore;
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{BufRead, Seek, BufWriter, BufReader, Read, Write};
+//use std::os::unix::fs::MetadataExt;
 use std::path::{PathBuf, Path};
 use std::time::Duration;
 use version::Version;
 
 pub mod args;
 
-const DEFAULT_ZSTD_LEVEL : i32 = 10;
+const DEFAULT_ZSTD_LEVEL : i32 = 15;
 
 fn cwd() -> PathBuf {
     std::env::current_dir().expect("failed to get current dir")
@@ -48,9 +51,9 @@ fn cwd() -> PathBuf {
 
 fn get_threads() -> u32 {
     let t = std::thread::available_parallelism().map_or(1, |v| v.get() as u32);
-
-    //println!("using {t} threads");
-    std::cmp::min(20, t)
+    let t = std::cmp::min(20, t);
+    tracing::trace!("using {t} threads");
+    t
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +96,7 @@ struct FileEntry {
     hash: Option<String>,
     ignore: bool,
     ignore_reason: Option<IgnoreReason>,
+    size: u64,
 }
 
 impl FileEntry {
@@ -143,7 +147,14 @@ fn build_ignore(paths: Vec<Utf8PathBuf>, patterns: Vec<String>) -> Result<Option
     Ok(Some(ignore))
 }
 /// Walk the filesystem, discovering all files from the given paths
-fn file_discovery(paths: Vec<String>) -> FileListing {
+fn file_discovery(paths: Vec<String>) -> Result<FileListing> {
+
+    // make sure each given file path actually exists
+    for path in &paths {
+        if !Utf8Path::new(path).exists() {
+            anyhow::bail!("path does not exist: {path}");
+        }
+    }
 
     let mut walker = ignore::WalkBuilder::new(paths.first().unwrap());
     for path in paths.iter().skip(1) {
@@ -174,6 +185,8 @@ fn file_discovery(paths: Vec<String>) -> FileListing {
         let ent_file_type = entry.file_type().expect("can't determine file type");
         let full_path = canonicalize_no_symlink(&full_path).unwrap();
 
+        let filesize = full_path.metadata().ok().map_or(0, |md| md.len());
+
         let file_type = {
             if ent_file_type.is_dir() {
                 FileType::Dir
@@ -200,17 +213,18 @@ fn file_discovery(paths: Vec<String>) -> FileListing {
             hash: None,
             ignore: false,
             ignore_reason: None,
+            size: filesize,
         });
     }
 
-    FileListing { files }
+    Ok(FileListing { files })
 }
 
 /// Calls file_discovery(), then marks ignored files,
 /// and optionally adds a wrapper root directory to all files
-fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<Gitignore>) -> FileListing {
+fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<Gitignore>) -> Result<FileListing> {
 
-    let mut file_list = file_discovery(paths);
+    let mut file_list = file_discovery(paths)?;
 
     let mut readd_parent_ignore = HashMap::new();
 
@@ -261,7 +275,7 @@ fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<G
         }
     }
 
-    file_list
+    Ok(file_list)
 }
 
 pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
@@ -290,9 +304,9 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
         //}
 
         let new_filename = package::make_packagefile_name(name, &package_version);
-        let new_filepath = package_filepath.with_file_name(&new_filename);
+        let new_filepath = package_filepath.with_file_name(new_filename);
 
-        let out_file = std::fs::File::create(&new_filepath).context("failed to open file for writing")?;
+        let out_file = std::fs::File::create(new_filepath).context("failed to open file for writing")?;
         let mut out_tar = tar::Builder::new(out_file);
 
         let in_file = std::fs::File::open(package_filepath).context("failed to open file for reading")?;
@@ -342,7 +356,7 @@ pub fn subcmd_list_files(file: &Path) -> Result<()> {
     file.rewind()?;
 
     let mut tar = tar::Archive::new(file);
-    let data = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut tar)?;
+    let (data, _size) = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut tar)?;
     let zstd = zstd::Decoder::new(data)?;
     let mut tar = tar::Archive::new(zstd);
     for ent in tar.entries()? {
@@ -353,17 +367,18 @@ pub fn subcmd_list_files(file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `bpmpack test-ignore`
 pub fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
 
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
     let verbose = *matches.get_one::<bool>("verbose").unwrap();
 
-    let patterns = matches.get_many::<String>("pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
+    let patterns = matches.get_many::<String>("ignore-pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
     let ignore_files = matches.get_many::<String>("ignore-file").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
     let ignore = build_ignore(ignore_files, patterns)?;
 
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
-    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore);
+    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore)?;
 
     let mut tw = tabwriter::TabWriter::new(std::io::stdout());
     let mut ignored_parents = HashSet::new();
@@ -433,8 +448,9 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         anyhow::bail!("output-dir path does not exist");
     }
 
+    let patterns = matches.get_many::<String>("ignore-pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
     let ignore_files = matches.get_many::<String>("ignore-file").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
-    let ignore = build_ignore(ignore_files, Vec::new())?;
+    let ignore = build_ignore(ignore_files, patterns)?;
 
     let package_name = matches.get_one::<String>("name").unwrap();
     if !package::is_package_name(package_name) {
@@ -458,20 +474,48 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     };
 
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
-    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore);
+    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore)?;
 
     // file names
     // - data - all target file in the package
     // - meta - meta data about data files
 
-    let mut package_file_path = PathBuf::from(&output_dir);
-    package_file_path.push(package::make_packagefile_name(package_name, package_version.as_str()));
+    let package_file_path = PathBuf::from(&output_dir).join(package::make_packagefile_name(package_name, package_version.as_str()));
 
     // scan the file list and verify symlinks
-    let mut symlink_settings = SymlinkSettings::default();
-    symlink_settings.allow_dne = *matches.get_one::<bool>("allow-symlink-dne").unwrap();
-    symlink_settings.allow_outside = *matches.get_one::<bool>("allow-symlink-outside").unwrap();
+    let symlink_settings = SymlinkSettings {
+        allow_dne: *matches.get_one::<bool>("allow-symlink-dne").unwrap(),
+        allow_outside: *matches.get_one::<bool>("allow-symlink-outside").unwrap(),
+    };
     verify_symlinks(&symlink_settings, &file_list)?;
+
+    // -- progress bars --
+    //                 _____________________________________________________________________
+    //  size_bar       | .: packing files     5s/20s         32 MiB/s     120MiB / 1GiB    |
+    //  count_bar      |    file 37/1000 [==============================              ]    |
+    //  comp_bar       |    compression  [==            ] 5MiB / 120MiB                    |
+    //  (then later)   |                                                                   |
+    //  finish_bar     |    writing package [===============            ] 25MiB / 50MiB    |
+    //                 ---------------------------------------------------------------------
+
+    let bars = MultiProgress::new();
+
+    let file_size_sum = file_list.files.iter().filter(|ent| !ent.ignore).map(|ent| ent.size).sum::<u64>();
+    let file_included_count = file_list.files.iter().filter(|ent| !ent.ignore).count() as u64;
+
+    let size_bar = bars.add(ProgressBar::new(file_size_sum));
+    let count_bar = bars.add(ProgressBar::new(file_included_count));
+    let comp_bar = bars.add(ProgressBar::new(0));
+    size_bar.enable_steady_tick(Duration::from_millis(200));
+    size_bar.set_style(ProgressStyle::with_template(
+        " {spinner:.green} packing files   {elapsed}/{duration}   {bytes_per_sec}   {bytes}/{total_bytes} "
+    ).unwrap());
+    count_bar.set_style(ProgressStyle::with_template(
+        "   file {pos}/{len} {wide_bar:.green} ").unwrap()
+    );
+    comp_bar.set_style(ProgressStyle::with_template(
+        "   compression  {percent}%  {bytes} / {total_bytes} {bar:25} "
+    ).unwrap());
 
     // layers of wrapping:
     // 1. raw file
@@ -483,9 +527,15 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // 7. tar builder
 
     let data_tar_file = tempfile::Builder::new().prefix(&format!("{}.{}.temp", package_name, package::DATA_FILE_NAME)).tempfile_in(&output_dir)?;
+
+    let path = data_tar_file.path();
+    tracing::debug!("using temp data file at {}", path.display());
+
     let data_tar_bufwriter = BufWriter::with_capacity(1024 * 1024, data_tar_file);
-    let data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
-    let data_tar_hasher = HashingWriter::new(data_tar_compressed_size_writer, blake3::Hasher::new());
+    let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
+    let comp_bar_iter = comp_bar.wrap_write(&mut data_tar_compressed_size_writer);
+    //let data_tar_hasher = HashingWriter::new(data_tar_compressed_size_writer, blake3::Hasher::new());
+    let data_tar_hasher = HashingWriter::new(comp_bar_iter, blake3::Hasher::new());
     let mut data_tar_zstd = zstd::stream::write::Encoder::new(data_tar_hasher, compress_level)?;
 
     #[cfg(feature="mt")]
@@ -503,21 +553,9 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     for pair in &deps {
         meta.add_dependency(package::DependencyID{
             name: pair.0.clone(),
-            //version: pair.1.clone(),
             version: Some(pair.1.as_ref().map_or("*".to_string(), |v| v.clone())),
         });
     }
-
-    //TODO subtract ignore_count?
-    let pb = ProgressBar::new(file_list.files.len() as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::with_template(
-            "{spinner} {wide_bar:.blue/white} {pos}/{len} {elapsed} {eta}",
-        )
-        .unwrap()
-        //.progress_chars("█▇▆▅▄▃▂▁ █")
-    );
-    pb.enable_steady_tick(Duration::from_millis(200));
 
     // keep track of parents that are ignored, don't report every single file that is ignored under
     // an already ignored directory
@@ -535,23 +573,26 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                     }
                 }
                 if !parent_ignored {
-                    pb.suspend(|| println!("I \t{}", entry.pkg_path));
+                    bars.suspend(|| println!("I \t{}", entry.pkg_path));
                 }
 
                 if entry.is_dir() {
                     ignored_parents.insert(entry.pkg_path);
                 }
             }
-            pb.inc(1);
             continue;
         }
+
+        //std::thread::sleep_ms(1);
+        count_bar.inc(1);
+        size_bar.inc(entry.size);
+        comp_bar.inc_length(entry.size);
 
         match entry.file_type {
             FileType::Dir => {
                 data_tar_tar.append_dir(&entry.pkg_path, &entry.full_path).context("inserting dir")?;
                 if verbose {
-                    //println!("Ad\t{}/", entry.pkg_path.display());
-                    pb.suspend(|| println!("Ad\t{}/", entry.pkg_path));
+                    bars.suspend(|| println!("Ad\t{}/", entry.pkg_path));
                 }
             }
             FileType::File => {
@@ -574,16 +615,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                 entry.hash = Some(hash.to_hex().to_string());
 
                 if verbose {
-                    pb.suspend(|| {
-                        println!(
-                            //"A\t{:-10}\t{}",
-                            "A\t{:-10}",
-                            entry.pkg_path,
-                            //hex_string(hash.as_slice())
-                        )
-                    });
-                    //println!("A\t{:-10}\t{}", entry.pkg_path.display(), hex_string(hash.as_slice()));
-                    //println!("A\t{}", entry.pkg_path.display());
+                    bars.suspend(|| println!("A\t{:-10}", entry.pkg_path));
                 }
             }
             FileType::Link(ref link_path) => {
@@ -599,8 +631,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                 entry.hash = Some(hash);
 
                 if verbose {
-                    pb.suspend(|| println!("As\t{}/", entry.pkg_path));
-                    //println!("A l\t{}/", entry.pkg_path.display());
+                    bars.suspend(|| println!("As\t{}/", entry.pkg_path));
                 }
             }
         }
@@ -609,9 +640,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
             hash: entry.hash,
             filetype: entry.file_type.into(),
             mtime: None,
+            volatile: false,
         });
-
-        pb.inc(1);
     }
 
     // unwrap all the layers of writers for the data tar file
@@ -619,23 +649,37 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let uncompressed_size = unc_counter.count;
     let zstd = unc_counter.into_inner();
     let hasher = zstd.finish()?;
-    let (comp_counter, hasher) = hasher.into_parts();
-    let compressed_size = comp_counter.count;
+    //let (comp_counter, hasher) = hasher.into_parts();
+    let (_comp_iter, hasher) = hasher.into_parts();
+    let compressed_size = data_tar_compressed_size_writer.count;
+    //let compressed_size = comp_counter.count;
     let data_tar_hash = hasher.finalize().to_hex().to_string();
-    let bufwriter =  comp_counter.into_inner();
+    //let bufwriter =  comp_counter.into_inner();
+    let bufwriter = data_tar_compressed_size_writer.inner;
     let mut file = bufwriter.into_inner()?;
     file.flush()?;
     //drop(file);
     let mut data_tar_file = file;
 
-    pb.finish_and_clear();
+    size_bar.finish_and_clear();
+    count_bar.finish_and_clear();
+    comp_bar.finish_and_clear();
 
     // fill in some more meta data and write the file
     meta.data_hash = Some(data_tar_hash.clone());
+    meta.data_size = uncompressed_size;
     meta.mount = Some(mount.clone());
     let mut metafile = tempfile::Builder::new().prefix(&format!("{}.{}.temp", package_name, package::META_FILE_NAME)).tempfile_in(&output_dir)?;
+    let path = metafile.path();
+    tracing::debug!("using temp meta file at {}", path.display());
     meta.to_writer(&mut metafile)?;
     metafile.flush()?;
+    let meta_data_size = metafile.stream_position().context("failed to get metadata file size")?;
+
+    let finish_bar = ProgressBar::new(compressed_size + meta_data_size);
+    let finish_bar = bars.add(finish_bar);
+    finish_bar.enable_steady_tick(Duration::from_millis(200));
+    finish_bar.set_style(ProgressStyle::with_template(" {spinner:.green} writing package {wide_bar:.green/white} {bytes}/{total_bytes}").unwrap());
 
     // --- create a single tar package file ---
     let package_file = File::create(&package_file_path)?;
@@ -650,7 +694,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         tar::HeaderMode::Complete
     );
     metafile.seek(std::io::SeekFrom::Start(0)).context("seeking in metadata")?;
-    package_tar.append_data(&mut header, package::META_FILE_NAME, &mut metafile)?;
+    //package_tar.append_data(&mut header, package::META_FILE_NAME, &mut metafile)?;
+    package_tar.append_data(&mut header, package::META_FILE_NAME, &mut finish_bar.wrap_read(&mut metafile))?;
 
     // data file
     let mut header = tar::Header::new_gnu();
@@ -659,7 +704,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         tar::HeaderMode::Complete
     );
     data_tar_file.seek(std::io::SeekFrom::Start(0)).context("seeking in metadata")?;
-    package_tar.append_data(&mut header, package::DATA_FILE_NAME, &mut data_tar_file)?;
+    //package_tar.append_data(&mut header, package::DATA_FILE_NAME, &mut data_tar_file)?;
+    package_tar.append_data(&mut header, package::DATA_FILE_NAME, &mut finish_bar.wrap_read(&mut data_tar_file))?;
 
     let hashing_writer = package_tar.into_inner()?;
 
@@ -668,6 +714,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let package_hash = hasher.finalize();
     package_file.into_inner()?.sync_all()?;
 
+    finish_bar.finish_and_clear();
+
     // cleanup
     // the important files are now in the package tarball, can cleanup the intermediate ones
     if *matches.get_one::<bool>("no-cleanup").unwrap() {
@@ -675,12 +723,14 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         let _ = data_tar_file.keep();
     }
 
+    println!("data file count:        {}", file_included_count);
     println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
     println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
     println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
-    println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
     println!("data hash [blake3]:     {}", data_tar_hash);
     println!("package hash [blake3]:  {}", package_hash);
+    println!("package size:           {} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
+    //println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
     println!("Package created at {}", std::fs::canonicalize(package_file_path.as_path())?.display());
 
     Ok(())
@@ -751,11 +801,23 @@ impl<W: Write> std::io::Write for CountingWriter<W> {
     }
 }
 
+//--------
+
+trait StreamCount {
+    fn count(&self) -> u64;
+}
+
 #[derive(Debug)]
 struct HashingWriter<Inner, Hasher> {
     inner: Inner,
     hasher: Hasher,
     count: u64,
+}
+
+impl<T,H> StreamCount for HashingWriter<T,H> {
+    fn count(&self) -> u64 {
+        self.count
+    }
 }
 
 impl<Inner: Write, Hasher: Write> std::io::Write for HashingWriter<Inner, Hasher> {

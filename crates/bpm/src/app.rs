@@ -173,10 +173,11 @@ impl App {
 
         // open the package file and get the metadata
         let mut file = File::open(&file_path).context("failed to open package file")?;
-        let mut metadata = package::get_metadata(&mut file).context("error reading metadata")?;
+        //let mut metadata = package::get_metadata(&mut file).context("error reading metadata")?;
 
         // make sure the checksum matches
-        if !package::package_integrity_check(&mut file)? {
+        let (ok, mut metadata) = package::package_integrity_check(&mut file)?;
+        if !ok {
             anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
         }
 
@@ -204,17 +205,27 @@ impl App {
         // obtain reader for embeded data archive
         file.rewind()?;
         let mut outer_tar = tar::Archive::new(&mut file);
-        let mut inner_tar = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
+        let (mut inner_tar, size) = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
         let mut zstd = zstd::stream::read::Decoder::new(&mut inner_tar)?;
         let mut data_tar = tar::Archive::new(&mut zstd);
 
+        let pbar = indicatif::ProgressBar::new(metadata.files.len() as u64);
+        pbar.set_style(indicatif::ProgressStyle::with_template(
+            "   {msg}\n {spinner:.green} installing {prefix} {wide_bar:.green} {pos}/{len} "
+        ).unwrap());
+        pbar.set_prefix(metadata.name.to_string());
+
         // unpack all files individually
         for entry in data_tar.entries()? {
+
             let mut entry = entry?;
 
             let installed_ok = entry.unpack_in(&install_dir)?;
 
             let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
+
+            pbar.set_message(String::from(path.as_str()));
+
             let installed_path = join_path_utf8!(&install_dir, &path);
 
             // store the mtime
@@ -230,7 +241,12 @@ impl App {
             if !installed_ok {
                 tracing::error!("unpack skipped {:?}", entry.path());
             }
+
+            pbar.inc(1);
+            //pbar.suspend(|| println!("{}", path));
         }
+
+        pbar.finish_and_clear();
 
         let mut details = db::DbPkg::new(metadata);
         details.location = install_dir.into();
@@ -309,7 +325,54 @@ impl App {
         Ok((result, versioning))
     }
 
+    // When `bpm install <file>` is called, we'll end up here if the file
+    // is named like a package.
+    //
+    // We want to cache the file, test it's validity, install xor cache evict
+    fn install_from_package_file(&mut self, filename: &str, path: &Utf8Path) -> AResult<()> {
+
+        tracing::trace!("installing directly from a package file {path}");
+
+        // check that the package file is not a path to a file in the cache dir
+        // (do not copy in place)
+
+        let cache_path = join_path_utf8!(&self.config.cache_dir, "packages", filename);
+
+        let in_cache_dir = {
+            let cache_path = cache_path.canonicalize_utf8().ok();
+            let path = path.canonicalize_utf8().ok();
+            path == cache_path
+        };
+
+        if !in_cache_dir {
+
+            // copy to the cache dir
+            tracing::trace!("copying {} to {}", path, cache_path);
+
+            let filesize = get_filesize(cache_path.as_str()).ok().unwrap_or(0);
+            let pbar = indicatif::ProgressBar::new(filesize);
+            pbar.set_style(indicatif::ProgressStyle::with_template(
+                " {spinner:.green} caching package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
+            ).unwrap());
+
+            std::io::copy(
+                &mut File::open(path)?,
+                &mut pbar.wrap_write(&mut File::create(&cache_path)?)
+            ).context("failed to copy package file into cache")?;
+
+            pbar.finish_and_clear();
+
+            // TODO
+            // validate the package
+            //let x = package::package_integrity_check_path(&cache_path);
+            //dbg!(&x);
+        }
+
+        return self.install_pkg_file(cache_path, Versioning::pinned_version());
+    }
+
     /// subcommand for installing a package
+    /// `bpm install`
     pub fn install_cmd(&mut self, pkg_name: &String, no_pin: bool) -> AResult<()> {
 
         self.create_load_db()?;
@@ -317,26 +380,16 @@ impl App {
         // make sure we have a cache dir to save the package in
         create_dir(&self.config.cache_dir)?;
 
-        // installing from a package file
         {
+            // are we installing directly from a package file?
+            // is the arg a filepath that exists?
+            // is the file named properly?
             let path = Utf8Path::new(pkg_name);
-            let filename = path.file_name();
             if let Ok(true) = path.try_exists() {
-                tracing::trace!(path=?path, "install from file");
+                tracing::trace!(path=?path, "testing if file path looks like a package");
+                let filename = path.file_name();
                 if let Some(filename) = filename && package::is_packagefile_name(filename) {
-                    tracing::trace!("installing directly from a package file {pkg_name}");
-
-                    // TODO check that the package file is not a path to a file in the cache dir
-                    // (DO NOT COPY IN PLACE)
-
-                    let cache_path = join_path_utf8!(&self.config.cache_dir, filename);
-
-                    // copy to the cache dir
-                    std::fs::copy(path, &cache_path).context("failed to copy package file")?;
-
-                    //TODO sanity check file contents
-
-                    return self.install_pkg_file(cache_path, Versioning::pinned_version());
+                    return self.install_from_package_file(filename, path);
                 } else {
                     anyhow::bail!("invalid package file")
                 }
@@ -412,24 +465,22 @@ impl App {
         let cache_file = &new_pkg_file;
         tracing::trace!("update_inplace {cache_file:?}");
 
-        // gather info about the old package (the currently installed version)
-        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently intalled")?;
-        //dbg!(&current_pkg_info);
-        let mut old_files = current_pkg_info.metadata.files.clone();
-        //dbg!(old_files.keys());
-
         let mut new_package_fd = std::fs::File::open(cache_file)?;
-        let metadata = package::get_metadata(&mut new_package_fd)?;
 
-        // make sure the checksum matches
-        if !package::package_integrity_check(&mut new_package_fd)? {
+        //// make sure the checksum matches
+        let (ok, metadata) = package::package_integrity_check(&mut new_package_fd)?;
+        if !ok {
             anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
         } else {
-            //tracing::trace!
+            tracing::trace!("package integrity check pass");
         }
 
         let new_files = metadata.files.clone();
         dbg!(&new_files.keys());
+
+        // gather info about the old package (the currently installed version)
+        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently intalled")?;
+        let mut old_files = current_pkg_info.metadata.files.clone();
 
         // old_files -= new_files
         for (path, new_file) in &new_files {
@@ -445,7 +496,6 @@ impl App {
 
         // these are the files to remove
         let remove_files = old_files;
-        //dbg!(remove_files.keys());
 
         let iter = remove_files.iter().map(|(path, info)| {
             let path = build_pkg_file_path(current_pkg_info, &path).unwrap();
@@ -487,7 +537,7 @@ impl App {
 
         new_package_fd.rewind()?;
         let mut outer_tar = tar::Archive::new(&mut new_package_fd);
-        let mut inner_tar = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
+        let (mut inner_tar, _size) = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
         let mut zstd = zstd::stream::read::Decoder::new(&mut inner_tar)?;
         let mut data_tar = tar::Archive::new(&mut zstd);
 
@@ -752,7 +802,7 @@ impl App {
                 // as the ones in the db (the installed version)
 
                 let mut outer_tar = tar::Archive::new(&cache_file);
-                let mut data_file = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut outer_tar)?;
+                let (mut data_file, _size) = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut outer_tar)?;
                 let mut zstd = zstd::Decoder::new(&mut data_file)?;
                 let mut data_tar = tar::Archive::new(&mut zstd);
 

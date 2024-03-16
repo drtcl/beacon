@@ -40,9 +40,10 @@ pub const META_FILE_NAME: &str = "meta.json";
 
 pub const DATA_FILE_NAME: &str = "data.tar.zst";
 
-const FILE_ATTR: &str = "f";
-const DIR_ATTR: &str = "d";
-const SYMLINK_ATTR: &str = "s";
+const FILE_ATTR: char = 'f';
+const DIR_ATTR:  char = 'd';
+const SYMLINK_ATTR: char = 's';
+const VOLATILE_ATTR: char = 'v';
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag="filetype")]
@@ -84,6 +85,8 @@ pub struct FileInfo {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtime: Option<u64>,
+
+    pub volatile: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -106,11 +109,13 @@ pub struct MetaData {
     pub version: Version,
     pub mount: Option<String>,
     pub data_hash: Option<String>,
+    pub data_size: u64,
+
     pub dependencies: OrderedMap<PkgName, Option<Version>>,
     pub files: OrderedMap<FilePath, FileInfo>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 struct FileInfoString(String);
 // strings look like this:
@@ -118,27 +123,59 @@ struct FileInfoString(String);
 // f:hash:mtime
 // s:link_to:hash
 
+/// FileInfo -> FileInfoString
 impl From<FileInfo> for FileInfoString {
     fn from(info: FileInfo) -> Self {
+        FileInfoString::from(&info)
+    }
+}
+
+
+/// &FileInfo -> FileInfoString
+impl From<&FileInfo> for FileInfoString {
+    fn from(info: &FileInfo) -> Self {
+
         let mut ret = String::new();
+
+        // file type
         match &info.filetype {
-            FileType::Dir => ret.push_str(DIR_ATTR),
-            FileType::File => ret.push_str(FILE_ATTR),
+            FileType::Dir => ret.push(DIR_ATTR),
+            FileType::File => ret.push(FILE_ATTR),
+            FileType::Link(_to) => ret.push(SYMLINK_ATTR),
+        }
+
+        // volatile
+        if info.volatile {
+            ret.push(VOLATILE_ATTR);
+        }
+
+        // symlink to
+        match &info.filetype {
             FileType::Link(to) => {
-                ret.push_str(SYMLINK_ATTR);
                 ret.push(':');
                 ret.push_str(to);
             }
+            _ => { }
         }
-        if let Some(hash) = info.hash {
-            ret.push(':');
+
+        // hash
+        ret.push(':');
+        if let Some(hash) = &info.hash {
             ret.push_str(&hash);
         }
+
+        // mtime
         if info.filetype.is_file() {
             if let Some(mtime) = info.mtime {
                 ret.push_str(&format!(":{mtime}"))
             }
         }
+
+        // trim any trailing :
+        while ret.ends_with(':') {
+            ret.truncate(ret.len() - 1);
+        }
+
         Self(ret)
     }
 }
@@ -148,27 +185,53 @@ impl TryFrom<FileInfoString> for FileInfo {
     fn try_from(s: FileInfoString) -> Result<Self, Self::Error> {
         let s = s.0;
         let mut iter = s.split(':');
-        let ft = iter.next();
-        let ft = match ft {
-            Some(FILE_ATTR) => Some(FileType::File),
-            Some(DIR_ATTR) => Some(FileType::Dir),
-            Some(SYMLINK_ATTR) => {
-                let to = iter.next().map(str::to_owned);
-                to.map(FileType::Link)
+
+        let mut volatile = false;
+        let mut ft = None;
+        if let Some(file_chars) = iter.next() {
+            let mut file_chars = file_chars.chars();
+
+            ft = match file_chars.next() {
+                Some(FILE_ATTR) => Some(FileType::File),
+                Some(DIR_ATTR) => Some(FileType::Dir),
+                Some(SYMLINK_ATTR) => {
+                    let to = iter.next().map(str::to_owned);
+                    to.map(FileType::Link)
+                }
+                Some(_) | None => None,
+            };
+
+            if let Some(v) = file_chars.next() && v == VOLATILE_ATTR {
+                volatile = true;
             }
-            Some(_) | None => None,
-        };
+        }
+
+//        let ft = iter.next();
+//        let ft = match ft {
+//            Some(FILE_ATTR) => Some(FileType::File),
+//            Some(DIR_ATTR) => Some(FileType::Dir),
+//            Some(SYMLINK_ATTR) => {
+//                let to = iter.next().map(str::to_owned);
+//                to.map(FileType::Link)
+//            }
+//            Some(_) | None => None,
+//        };
         if ft.is_none() {
             return Err(s);
         }
 
-        let hash = iter.next().map(str::to_owned);
+        let mut hash = iter.next().map(str::to_owned);
+        if hash.as_deref() == Some("") {
+            hash = None;
+        }
+
         let mtime = iter.next().and_then(|v| v.parse::<u64>().ok());
 
         let ret = Self {
             filetype: ft.unwrap(),
             hash,
             mtime,
+            volatile,
         };
 
         Ok(ret)
@@ -183,6 +246,7 @@ impl MetaData {
             version: id.version,
             mount: None,
             data_hash: None,
+            data_size: 0,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
         }
@@ -249,19 +313,17 @@ impl MetaData {
         &self.files
     }
 
-    //pub fn set_data_hash(&mut self, hash: String) {
-    //self.data_hash = Some(hash);
-    //}
 }
 
-pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> Result<tar::Entry<'a, R>>
+pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> Result<(tar::Entry<'a, R>, u64)>
     where R: Read + Seek
 {
     let needle = Utf8Path::new(needle);
     for entry in tar.entries_with_seek().context("failed to read tar archive")? {
         let entry = entry.context("failed to read tar archive")?;
         if let Ok(path) = entry.path() && path == needle {
-            return Ok(entry);
+            let size = entry.size();
+            return Ok((entry, size));
         }
         //if let Ok(path) = entry.as_ref().unwrap().path() && path == needle {
             //return Ok(entry?);
@@ -270,28 +332,46 @@ pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> R
     Err(anyhow::anyhow!("path {} not found in tar archive", needle))
 }
 
+pub fn package_integrity_check_path(path: &Utf8Path) -> Result<(bool, MetaData)> {
+    let mut file = File::open(path).context("reading file")?;
+    package_integrity_check(&mut file)
+}
+
 /// Check that package file is self consistent. The metadata file list and data hash matches.
-pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<bool> {
+pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaData)> {
+
+    let pbar = indicatif::ProgressBar::new(1);
+    pbar.enable_steady_tick(std::time::Duration::from_millis(200));
+    pbar.set_style(indicatif::ProgressStyle::with_template(
+        " {spinner:.green} verifying package"
+    ).unwrap());
 
     let metadata = get_metadata(pkg_file).context("error reading package metadata")?;
 
     let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
 
     pkg_file.rewind()?;
-
     let computed_sum = {
-        let mut tar = tar::Archive::new(pkg_file);
-        let mut data = seek_to_tar_entry("data.tar.zst", &mut tar)?;
-        let computed_sum = blake3_hash_reader(&mut data)?;
-        pkg_file = tar.into_inner();
+
+        let mut tar = tar::Archive::new(&mut pkg_file);
+        let (mut data, size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
+
+        pbar.set_length(size);
+        pbar.set_style(indicatif::ProgressStyle::with_template(
+            " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
+        ).unwrap());
+
+        let computed_sum = blake3_hash_reader(&mut pbar.wrap_read(&mut data))?;
         computed_sum
     };
     let matches = &computed_sum == described_sum;
     tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
 
+    pbar.finish_and_clear();
+
     if !matches {
         tracing::error!("package file data hash mismatch {} != {}", computed_sum, described_sum);
-        return Ok(false);
+        return Ok((false, metadata));
     }
 
     let mut meta_filelist = metadata.files.clone();
@@ -299,39 +379,48 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<bool> {
     // check the file list
     pkg_file.rewind()?;
     {
+
+        let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
+        pbar.set_style(indicatif::ProgressStyle::with_template(
+            " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
+        ).unwrap());
+
         let mut outer_tar = tar::Archive::new(pkg_file);
-        let data_tar_zst = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
+        let (data_tar_zst, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
         let zstd = zstd::Decoder::new(data_tar_zst)?;
         let mut tar = tar::Archive::new(zstd);
         for ent in tar.entries()? {
+            pbar.inc(1);
             let ent = ent?;
             let path = ent.path()?;
             let path = path.to_string_lossy().to_string();
             let path = Utf8Path::new(&path);
             if meta_filelist.remove(path).is_none() {
                 tracing::error!("a file in the tar was not listed in the metadata {}", path);
-                return Ok(false);
+                return Ok((false, metadata));
             }
             // TODO also check that the file type matches
         }
+
+        pbar.finish_and_clear();
 
         // if there are any remaining files, those were not in the tar
         if !meta_filelist.is_empty() {
             let path = meta_filelist.pop_first().unwrap().0;
             tracing::error!("a file in the metadata was not in the data tar: {}", path);
-            return Ok(false);
+            return Ok((false, metadata));
         }
     }
 
     tracing::trace!("package passes integrity check");
 
-    Ok(true)
+    Ok((true, metadata))
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
     pkg_file.rewind()?;
     let mut tar = tar::Archive::new(pkg_file);
-    let mut meta = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
+    let (mut meta, _size) = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
     let metadata = MetaData::from_reader(&mut meta)?;
     Ok(metadata)
 }
@@ -436,6 +525,7 @@ mod test {
             //},
             mount: Some("EXT".into()),
             data_hash: None,
+            data_size: 0,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
         };
@@ -455,6 +545,7 @@ mod test {
                 filetype: FileType::Dir,
                 hash: None,
                 mtime: None,
+                volatile: false,
             },
         );
         meta.add_file(
@@ -463,6 +554,7 @@ mod test {
                 filetype: FileType::File,
                 hash: Some("2ffac14".into()),
                 mtime: None,
+                volatile: false,
             },
         );
         meta.add_file(
@@ -471,6 +563,7 @@ mod test {
                 filetype: FileType::File,
                 hash: Some("1aef313".into()),
                 mtime: None,
+                volatile: false,
             },
         );
         meta.add_file(
@@ -479,6 +572,7 @@ mod test {
                 filetype: FileType::Link("a1.c".into()),
                 hash: Some("77af123".into()),
                 mtime: None,
+                volatile: false,
             },
         );
 
@@ -493,8 +587,92 @@ mod test {
         meta.to_writer(&mut output)?;
         println!("{}", String::from_utf8_lossy(&output));
         let ret = MetaData::from_reader(&mut std::io::Cursor::new(output.as_slice()))?;
-        dbg!(&ret);
+
         assert_eq!(meta, ret);
         Ok(())
     }
+
+    #[test]
+    fn fileinfo_file_no_hash() {
+        let info = FileInfo {
+            filetype: FileType::File,
+            hash: None,
+            mtime: Some(100),
+            volatile: false,
+        };
+
+        let s = FileInfoString("f::100".into());
+        let info_from = FileInfo::try_from(s.clone()).unwrap();
+        let s_from = FileInfoString::from(&info);
+        assert_eq!(s, s_from);
+        assert_eq!(info, info_from);
+    }
+
+    #[test]
+    fn fileinfo_file_volatile() {
+        let info = FileInfo {
+            filetype: FileType::File,
+            hash: Some("a1b2".into()),
+            mtime: Some(100),
+            volatile: true,
+        };
+
+        let s = FileInfoString("fv:a1b2:100".into());
+        let info_from = FileInfo::try_from(s.clone()).unwrap();
+        let s_from = FileInfoString::from(&info);
+        assert_eq!(s, s_from);
+        assert_eq!(info, info_from);
+    }
+
+    #[test]
+    fn fileinfo_dir() {
+
+        let info = FileInfo {
+            filetype: FileType::Dir,
+            hash: None,
+            mtime: None,
+            volatile: false,
+        };
+
+        let s = FileInfoString("d".into());
+        let info_from = FileInfo::try_from(s.clone()).unwrap();
+        let s_from = FileInfoString::from(&info);
+        assert_eq!(s, s_from);
+        assert_eq!(info, info_from);
+    }
+
+    #[test]
+    fn fileinfo_link() {
+
+        let info = FileInfo {
+            filetype: FileType::Link(String::from("foo/bar")),
+            hash: None,
+            mtime: None,
+            volatile: false,
+        };
+
+        let s = FileInfoString("s:foo/bar".into());
+        let info_from = FileInfo::try_from(s.clone()).unwrap();
+        let s_from = FileInfoString::from(&info);
+        assert_eq!(s, s_from);
+        assert_eq!(info, info_from);
+    }
+
+    #[test]
+    fn fileinfo_link_volatile() {
+
+        let info = FileInfo {
+            filetype: FileType::Link(String::from("foo/bar")),
+            hash: None,
+            mtime: None,
+            volatile: true,
+        };
+
+        let s = FileInfoString("sv:foo/bar".into());
+        let info_from = FileInfo::try_from(s.clone()).unwrap();
+        let s_from = FileInfoString::from(&info);
+        assert_eq!(s, s_from);
+        assert_eq!(info, info_from);
+    }
+
 }

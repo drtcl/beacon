@@ -120,8 +120,23 @@ impl Fetch for Http {
 
         tracing::trace!(pkg=?pkg, url, "Http::fetch()");
 
+        let bar = indicatif::ProgressBar::new(0);
+        bar.set_style(
+            indicatif::ProgressStyle::with_template(
+                " {spinner:.green} downloading {msg} {bytes_per_sec} {bytes} "
+            ).unwrap()
+        );
+
+        bar.set_message(pkg.name.clone());
+
+        let mut write = bar.wrap_write(write);
+        //let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_millis(1));
+
         //let client = httpsearch::Client::new();
-        let n = httpsearch::download(None, url, write)?;
+        let n = httpsearch::download(None, url, &mut write)?;
+
+        bar.finish_and_clear();
+
         Ok(n)
     }
 }

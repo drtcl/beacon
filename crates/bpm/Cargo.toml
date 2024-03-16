@@ -21,6 +21,7 @@ blake3 = { workspace = true }
 camino = { workspace = true, features = ["serde1"]}
 chrono = { workspace = true, features = ["serde"]}
 clap = { workspace = true }
+indicatif = { workspace = true }
 regex = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"]}
