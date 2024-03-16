@@ -373,6 +373,8 @@ pub fn download(timeout: Option<u64>, url: &str, write: &mut dyn std::io::Write)
 
 pub fn client_download(client: &Client, url: &Url, write: &mut dyn std::io::Write) -> Result<u64> {
 
+    tracing::trace!("downloading {url}");
+
     // TODO probably want to find a better way to download,
     // this has the entire file in memory before writing to file
     let mut resp = client.get(url.as_str()).send()?;
