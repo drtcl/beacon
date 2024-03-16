@@ -9,15 +9,16 @@ edition = "2021"
 bpmutil = { path = "../bpmutil" }
 
 anyhow = { workspace = true }
-camino = { workspace = true, features = ["serde1"]}
+camino = { workspace = true, features = ["serde1"] }
 indicatif = { workspace = true }
-serde = { workspace = true, features = ["derive"]}
+serde = { workspace = true, features = ["derive"] }
 serde_derive = { workspace = true }
 serde_json = { workspace = true, optional = true }
 tar = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
-zstd = { workspace = true, features = ["zstdmt"]}
+uuid = { workspace = true, features = ["v4"] }
+zstd = { workspace = true, features = ["zstdmt"] }
 
 #serde_yaml = { version = "0.9.21", optional = true }
 

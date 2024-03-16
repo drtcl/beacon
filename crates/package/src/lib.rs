@@ -113,6 +113,9 @@ pub struct MetaData {
 
     pub dependencies: OrderedMap<PkgName, Option<Version>>,
     pub files: OrderedMap<FilePath, FileInfo>,
+
+    // package build-time UUID
+    pub uuid: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -249,6 +252,7 @@ impl MetaData {
             data_size: 0,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
+            uuid: uuid::Uuid::nil().to_string(),
         }
     }
 

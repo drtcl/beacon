@@ -1,11 +1,4 @@
-//TODO
-// - should refuse to overwrite existing package files
-// - use semver for the version number, validate it?
-// - dependencies
-// - package recipies
-//   - ignore files
-//   - package descriptions
-//   - README / docs for packages
+#![feature(let_chains)]
 
 // take a list of files
 // save them into a data tarball
@@ -25,8 +18,16 @@
 //  !a/b/c/file.txt
 //
 //  does this parent dirs: a, a/b, and a/b/c, need to be white listed and added to the data tar?
+//
 
-//.progress_chars("█▇▆▅▄▃▂▁ █")
+//! File attributes:
+//!  A  added
+//!  W  white listed -- explicitly not ignored
+//!  I  ignored
+//!  d  type is directory
+//!  s  type is symlink
+//!  v  volatile
+//!  w  weak
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -36,7 +37,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{BufRead, Seek, BufWriter, BufReader, Read, Write};
-//use std::os::unix::fs::MetadataExt;
 use std::path::{PathBuf, Path};
 use std::time::Duration;
 use version::Version;
@@ -49,11 +49,15 @@ fn cwd() -> PathBuf {
     std::env::current_dir().expect("failed to get current dir")
 }
 
-fn get_threads() -> u32 {
-    let t = std::thread::available_parallelism().map_or(1, |v| v.get() as u32);
-    let t = std::cmp::min(20, t);
-    tracing::trace!("using {t} threads");
-    t
+/// determine how many threads to use.
+/// 0 maps to MAX, where MAX is available_parallelism capped to 20
+fn get_threads(n: u32) -> u32 {
+    let avail = std::cmp::min(20, std::thread::available_parallelism().map_or(1, |v| v.get() as u32));
+    if n == 0 || n > avail {
+        avail
+    } else {
+        n
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +101,7 @@ struct FileEntry {
     ignore: bool,
     ignore_reason: Option<IgnoreReason>,
     size: u64,
+    modes: FileModes,
 }
 
 impl FileEntry {
@@ -113,39 +118,183 @@ struct FileListing {
     files: Vec<FileEntry>,
 }
 
-/// Build a GitIgnore using a list of ignore files
-fn build_ignore(paths: Vec<Utf8PathBuf>, patterns: Vec<String>) -> Result<Option<Gitignore>> {
+#[derive(Debug, Default, Clone)]
+struct FileModes {
+    volatile: bool,
+    weak: bool,
+}
 
-    if paths.is_empty() && patterns.is_empty() {
-        return Ok(None);
+#[derive(Debug, Default)]
+struct ModeGlob {
+    modes: FileModes,
+    ignore: bool,
+    glob: String,
+    source: String,
+}
+
+/// parse a single modes file into a list of ModeGlob
+fn parse_modes_file(path: &Utf8Path) -> Result<Vec<ModeGlob>> {
+
+    let file = BufReader::new(File::open(path)?);
+    let mut globs = Vec::new();
+
+    for (line_num, line) in file.lines().enumerate() {
+
+        if let Ok(line) = line {
+
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let mut parts = line.trim().split(' ').filter(|s| *s != "");
+
+            let mut entry = ModeGlob::default();
+
+            let modes = parts.next().context("missing modes")?;
+            let glob = parts.next().context("missing path pattern")?;
+
+            entry.glob = String::from(glob);
+
+            for mode in modes.split(',').filter(|s| *s != "") {
+                match mode {
+                    "volatile" | "v" =>  {
+                        entry.modes.volatile = true;
+                    },
+                    "weak" | "w" =>  {
+                        entry.modes.weak= true;
+                    },
+                    "ignore" | "i" =>  {
+                        entry.ignore = true;
+                    },
+                    _ => {
+                        eprintln!("ignoring unrecognized file mode: {}:{} '{}'", path, line_num+1, mode);
+                    }
+                }
+            }
+
+            entry.source = format!("{}:{}", path, line_num+1);
+            globs.push(entry);
+        }
     }
+
+    Ok(globs)
+}
+
+/// parse an ignore file into a list of ModeGlob
+fn parse_ignore_file(path: &Utf8Path) -> Result<Vec<ModeGlob>> {
+
+    let file = BufReader::new(File::open(path)?);
+    let mut globs = Vec::new();
+
+    for (line_num, line) in file.lines().enumerate() {
+
+        if let Ok(line) = line {
+
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            globs.push(ModeGlob {
+                source: format!("{}:{}", path, line_num+1),
+                ignore: true,
+                glob: String::from(line),
+                ..Default::default()
+            });
+        }
+    }
+
+    Ok(globs)
+}
+
+fn build_globs(modes: &Vec<Utf8PathBuf>, igfiles: &Vec<Utf8PathBuf>, igpatterns: Vec<String>) -> Result<Vec<ModeGlob>> {
+
+    let mut globs = Vec::new();
+
+    for file in modes {
+        globs.extend(parse_modes_file(file)?);
+    }
+
+    for file in igfiles {
+        globs.extend(parse_ignore_file(file)?);
+    }
+
+    globs.extend(igpatterns.into_iter().map(|pattern| {
+        ModeGlob {
+            ignore: true,
+            source: format!("pattern:{pattern}"),
+            glob: pattern,
+            ..Default::default()
+        }
+    }).collect::<Vec<_>>());
+
+    Ok(globs)
+}
+
+fn build_ignore_from_globs(globs: &Vec<ModeGlob>) -> Result<Option<Gitignore>> {
 
     let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
+    let mut empty = true;
 
-    for ignore_file in paths {
-        let ignore_file = Path::new(&ignore_file);
-        if !ignore_file.exists() {
-            anyhow::bail!("ignore-file does not exist");
+    for glob in globs {
+
+        if !glob.ignore {
+            continue;
         }
+        empty = false;
 
-        let read = std::io::BufReader::new(File::open(ignore_file)?);
-        let mut line_num = 1;
-        for line in read.lines() {
-            let mut from = ignore_file.to_path_buf();
-            from.set_file_name(format!("{}:{}", from.file_name().unwrap().to_str().unwrap(), line_num));
-            builder.add_line(Some(from), &line?)?;
-            line_num += 1;
-        }
-
+        builder.add_line(Some(glob.source.clone().into()), &glob.glob)?;
     }
 
-    for pattern in patterns {
-        builder.add_line(None, &pattern)?;
+    if empty {
+        Ok(None)
+    } else {
+        Ok(Some(builder.build()?))
     }
-
-    let ignore = builder.build()?;
-    Ok(Some(ignore))
 }
+
+#[derive(Debug)]
+struct ModeMatcher {
+    volatile: Gitignore,
+    weak: Gitignore,
+}
+
+impl ModeMatcher {
+    fn is_volatile(&self, path: &Utf8Path, is_dir: bool) -> bool {
+        match self.volatile.matched(path, is_dir) {
+            ignore::Match::None => false ,
+            _ => true,
+        }
+    }
+    fn is_weak(&self, path: &Utf8Path, is_dir: bool) -> bool {
+        match self.weak.matched(path, is_dir) {
+            ignore::Match::None => false ,
+            _ => true,
+        }
+    }
+}
+
+fn build_mode_matcher(globs: &Vec<ModeGlob>) -> Result<ModeMatcher> {
+
+    let mut volatile = ignore::gitignore::GitignoreBuilder::new(".");
+    let mut weak = ignore::gitignore::GitignoreBuilder::new(".");
+
+    for glob in globs {
+        if glob.modes.volatile {
+            volatile.add_line(Some(glob.source.clone().into()), &glob.glob)?;
+        }
+        if glob.modes.weak {
+            weak.add_line(Some(glob.source.clone().into()), &glob.glob)?;
+        }
+    }
+
+    Ok(ModeMatcher {
+        volatile: volatile.build()?,
+        weak: weak.build()?,
+    })
+}
+
 /// Walk the filesystem, discovering all files from the given paths
 fn file_discovery(paths: Vec<String>) -> Result<FileListing> {
 
@@ -214,6 +363,7 @@ fn file_discovery(paths: Vec<String>) -> Result<FileListing> {
             ignore: false,
             ignore_reason: None,
             size: filesize,
+            modes: FileModes::default(),
         });
     }
 
@@ -222,7 +372,7 @@ fn file_discovery(paths: Vec<String>) -> Result<FileListing> {
 
 /// Calls file_discovery(), then marks ignored files,
 /// and optionally adds a wrapper root directory to all files
-fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<Gitignore>) -> Result<FileListing> {
+fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<Gitignore>, mode_matcher: &ModeMatcher) -> Result<FileListing> {
 
     let mut file_list = file_discovery(paths)?;
 
@@ -263,6 +413,12 @@ fn gather_files(paths: Vec<String>, wrap_dir: Option<&String>, ignore: &Option<G
                 }
             }
         }
+    }
+
+    // mark file modes
+    for file in file_list.files.iter_mut() {
+        file.modes.volatile = mode_matcher.is_volatile(&file.pkg_path, file.is_dir());
+        file.modes.weak = mode_matcher.is_weak(&file.pkg_path, file.is_dir());
     }
 
     // add the wrap dir
@@ -373,17 +529,23 @@ pub fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
     let verbose = *matches.get_one::<bool>("verbose").unwrap();
 
-    let patterns = matches.get_many::<String>("ignore-pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
+    let modes_files = matches.get_many::<String>("file-modes").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
     let ignore_files = matches.get_many::<String>("ignore-file").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
-    let ignore = build_ignore(ignore_files, patterns)?;
+    let patterns = matches.get_many::<String>("ignore-pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
+    let globs = build_globs(&modes_files, &ignore_files, patterns)?;
+    let ignore = build_ignore_from_globs(&globs)?;
+    let mode_matcher = build_mode_matcher(&globs)?;
 
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
-    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore)?;
+    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore, &mode_matcher)?;
 
     let mut tw = tabwriter::TabWriter::new(std::io::stdout());
     let mut ignored_parents = HashSet::new();
+
     for file in file_list.files {
+
         if file.ignore {
+
             let mut parent_ignored = false;
             if let Some(parent) = file.pkg_path.parent() {
                 if ignored_parents.contains(parent) {
@@ -392,23 +554,39 @@ pub fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
             }
             if verbose || !parent_ignored {
                 let reason = if let Some(reason) = &file.ignore_reason {
-                    format!("({}:{})", reason.file, reason.pattern)
+                    Some(format!("({} {})", reason.file, reason.pattern))
                 } else {
-                    String::new()
+                    None
                 };
-                //println!("I  {}    {}", file.pkg_path, reason);
-                writeln!(&mut tw, "I   {}\t{}", file.pkg_path, reason)?;
+                let reason = reason.as_deref().unwrap_or("");
+                writeln!(&mut tw, "I\t{}  {}", file.pkg_path, reason)?;
             }
+
             if file.is_dir() {
                 ignored_parents.insert(file.pkg_path);
             }
-        } else if let Some(reason) = file.ignore_reason {
-            let reason = format!("({} {})", reason.file, reason.pattern);
-            //println!("Aw {}    {}", file.pkg_path, reason);
-            writeln!(&mut tw, "Aw  {}\t{}", file.pkg_path, reason)?;
-        } else if verbose {
-            //println!("A  {}", file.pkg_path);
-            writeln!(&mut tw, "A   {}\t", file.pkg_path)?;
+
+        } else {
+
+            let mut whitelisted = false;
+            let mut w_reason = None;
+
+            if let Some(reason) = &file.ignore_reason {
+                whitelisted = true;
+                w_reason = Some(format!("({} {})", reason.file, reason.pattern));
+            }
+
+            if whitelisted || verbose {
+                writeln!(&mut tw, "A{}{}{}{}{}\t{}  {}",
+                    if whitelisted         { "W" } else { "" },
+                    if file.is_dir()       { "d" } else { "" },
+                    if file.is_symlink()   { "s" } else { "" },
+                    if file.modes.volatile { "v" } else { "" },
+                    if file.modes.weak     { "w" } else { "" },
+                    &file.pkg_path,
+                    w_reason.as_deref().unwrap_or("")
+                )?;
+            }
         }
     }
 
@@ -424,8 +602,10 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let mount = matches.get_one::<String>("mount").unwrap();
     let require_semver = *matches.get_one::<bool>("semver").unwrap();
 
-    let compress_level = *matches.get_one::<u32>("compress-level").expect("expected compression level") as i32;
+    let compress_level = *matches.get_one::<u32>("complevel").expect("expected compression level") as i32;
     let compress_level = if 0 == compress_level { DEFAULT_ZSTD_LEVEL } else { compress_level };
+
+    let thread_count = get_threads(*matches.get_one::<u8>("threads").expect("expected thread count") as u32);
 
     let deps: Vec<(String, Option<String>)> = matches.get_many::<String>("depend")
         .map(|refs| refs.into_iter().map(|s| s.to_string()).collect())
@@ -448,9 +628,12 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         anyhow::bail!("output-dir path does not exist");
     }
 
-    let patterns = matches.get_many::<String>("ignore-pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
+    let modes_files = matches.get_many::<String>("file-modes").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
     let ignore_files = matches.get_many::<String>("ignore-file").map_or(Vec::new(), |paths| paths.map(Utf8PathBuf::from).collect());
-    let ignore = build_ignore(ignore_files, patterns)?;
+    let patterns = matches.get_many::<String>("ignore-pattern").map_or(Vec::new(), |patterns| patterns.map(String::from).collect());
+    let globs = build_globs(&modes_files, &ignore_files, patterns)?;
+    let ignore = build_ignore_from_globs(&globs)?;
+    let mode_matcher = build_mode_matcher(&globs)?;
 
     let package_name = matches.get_one::<String>("name").unwrap();
     if !package::is_package_name(package_name) {
@@ -474,7 +657,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     };
 
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
-    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore)?;
+    let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore, &mode_matcher)?;
 
     // file names
     // - data - all target file in the package
@@ -520,36 +703,51 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // layers of wrapping:
     // 1. raw file
     // 2. BufWriter
-    // 3. CountingWriter (for compressed size)
-    // 4. HashingWriter
-    // 5. zstd compressor
-    // 6. CountingWriter (for uncompressed size)
-    // 7. tar builder
+    // 3. HashingWriter
+    // 4. zstd compressor
+    // 5. CountingWriter (for uncompressed size)
+    // 6. tar builder
 
+    // 1
     let data_tar_file = tempfile::Builder::new().prefix(&format!("{}.{}.temp", package_name, package::DATA_FILE_NAME)).tempfile_in(&output_dir)?;
 
     let path = data_tar_file.path();
     tracing::debug!("using temp data file at {}", path.display());
 
-    let data_tar_bufwriter = BufWriter::with_capacity(1024 * 1024, data_tar_file);
-    let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
-    let comp_bar_iter = comp_bar.wrap_write(&mut data_tar_compressed_size_writer);
+    // 2
+    let mut data_tar_bufwriter = BufWriter::with_capacity(1024 * 1024, data_tar_file);
+    //let mut data_tar_compressed_size_writer = CountingWriter::new(data_tar_bufwriter);
+    //let comp_bar_iter = comp_bar.wrap_write(&mut data_tar_compressed_size_writer);
     //let data_tar_hasher = HashingWriter::new(data_tar_compressed_size_writer, blake3::Hasher::new());
+
+    let comp_bar_iter = comp_bar.wrap_write(&mut data_tar_bufwriter);
+    // 3, 4
     let data_tar_hasher = HashingWriter::new(comp_bar_iter, blake3::Hasher::new());
     let mut data_tar_zstd = zstd::stream::write::Encoder::new(data_tar_hasher, compress_level)?;
 
-    #[cfg(feature="mt")]
-    data_tar_zstd.multithread(get_threads())?;
+    #[cfg(feature="mt")] {
+        data_tar_zstd.multithread(thread_count)?;
+        tracing::trace!("using {thread_count} threads");
+    }
 
+    // 5
     let data_tar_uncompressed_size_writer = CountingWriter::new(data_tar_zstd);
 
+    // 6
     let mut data_tar_tar = tar::Builder::new(data_tar_uncompressed_size_writer);
+
+    // don't follow symlink, look at symlinks as symlinks, not files
     data_tar_tar.follow_symlinks(false);
 
+    // start creating the MetaData for this package
     let mut meta = package::MetaData::new(package::PackageID {
         name: package_name.clone(),
-        version: format!("{}", package_version),
+        version: package_version.to_string(),
     });
+
+    meta.uuid = uuid::Uuid::new_v4().to_string();
+
+    // insert dependencies
     for pair in &deps {
         meta.add_dependency(package::DependencyID{
             name: pair.0.clone(),
@@ -591,9 +789,6 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         match entry.file_type {
             FileType::Dir => {
                 data_tar_tar.append_dir(&entry.pkg_path, &entry.full_path).context("inserting dir")?;
-                if verbose {
-                    bars.suspend(|| println!("Ad\t{}/", entry.pkg_path));
-                }
             }
             FileType::File => {
                 let fd = File::open(&entry.full_path).context("opening file")?;
@@ -613,13 +808,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                 let (_, hasher) = reader.into_parts();
                 let hash = hasher.finalize();
                 entry.hash = Some(hash.to_hex().to_string());
-
-                if verbose {
-                    bars.suspend(|| println!("A\t{:-10}", entry.pkg_path));
-                }
             }
             FileType::Link(ref link_path) => {
-                //dbg!(&entry);
                 let mut header = tar::Header::new_gnu();
                 header.set_entry_type(tar::EntryType::Symlink);
                 header.set_size(0);
@@ -629,37 +819,39 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                 hasher.update(link_path.as_str().as_bytes());
                 let hash = hasher.finalize().to_hex().to_string();
                 entry.hash = Some(hash);
-
-                if verbose {
-                    bars.suspend(|| println!("As\t{}/", entry.pkg_path));
-                }
             }
+        }
+
+        if verbose {
+            bars.suspend(|| {
+                println!("A{}{}{}{} \t{}",
+                    if entry.is_dir()       { "d" } else { "" },
+                    if entry.is_symlink()   { "s" } else { "" },
+                    if entry.modes.volatile { "v" } else { "" },
+                    if entry.modes.weak     { "w" } else { "" },
+                    &entry.pkg_path)
+            });
         }
 
         meta.add_file(entry.pkg_path, package::FileInfo {
             hash: entry.hash,
             filetype: entry.file_type.into(),
             mtime: None,
-            volatile: false,
+            volatile: entry.modes.volatile,
         });
     }
 
     // unwrap all the layers of writers for the data tar file
     let unc_counter = data_tar_tar.into_inner()?;
-    let uncompressed_size = unc_counter.count;
+    let uncompressed_size = unc_counter.count();
     let zstd = unc_counter.into_inner();
-    let hasher = zstd.finish()?;
-    //let (comp_counter, hasher) = hasher.into_parts();
-    let (_comp_iter, hasher) = hasher.into_parts();
-    let compressed_size = data_tar_compressed_size_writer.count;
-    //let compressed_size = comp_counter.count;
+
+    let hashing_writer = zstd.finish()?;
+    let compressed_size = hashing_writer.count();
+    let (_comp_iter, hasher) = hashing_writer.into_parts();
     let data_tar_hash = hasher.finalize().to_hex().to_string();
-    //let bufwriter =  comp_counter.into_inner();
-    let bufwriter = data_tar_compressed_size_writer.inner;
-    let mut file = bufwriter.into_inner()?;
-    file.flush()?;
-    //drop(file);
-    let mut data_tar_file = file;
+    let mut data_tar_file = data_tar_bufwriter.into_inner()?;
+    data_tar_file.flush()?;
 
     size_bar.finish_and_clear();
     count_bar.finish_and_clear();
@@ -753,6 +945,12 @@ struct HashingReader<Inner, Hasher> {
     count: u64,
 }
 
+//impl<T, H> HashingReader<T, H> {
+//    fn count(&self) -> u64 {
+//        self.count
+//    }
+//}
+
 impl<Inner: Read, Hasher: Write> std::io::Read for HashingReader<Inner, Hasher> {
     fn read(&mut self, data: &mut [u8]) -> Result<usize, std::io::Error> {
         let ret = self.inner.read(data);
@@ -786,6 +984,9 @@ impl<W: Write> CountingWriter<W> {
     fn into_inner(self) -> W {
         self.inner
     }
+    fn count(&self) -> u64 {
+        self.count
+    }
 }
 
 impl<W: Write> std::io::Write for CountingWriter<W> {
@@ -803,10 +1004,6 @@ impl<W: Write> std::io::Write for CountingWriter<W> {
 
 //--------
 
-trait StreamCount {
-    fn count(&self) -> u64;
-}
-
 #[derive(Debug)]
 struct HashingWriter<Inner, Hasher> {
     inner: Inner,
@@ -814,13 +1011,14 @@ struct HashingWriter<Inner, Hasher> {
     count: u64,
 }
 
-impl<T,H> StreamCount for HashingWriter<T,H> {
+impl<T, H> HashingWriter<T, H> {
     fn count(&self) -> u64 {
         self.count
     }
 }
 
 impl<Inner: Write, Hasher: Write> std::io::Write for HashingWriter<Inner, Hasher> {
+
     fn write(&mut self, data: &[u8]) -> Result<usize, std::io::Error> {
         let ret = self.inner.write(data);
         if let Ok(n) = ret {
