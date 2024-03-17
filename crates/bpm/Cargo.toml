@@ -31,6 +31,7 @@ tabwriter = { workspace = true }
 tar = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
+wild = { workspace = true }
 walkdir = { workspace = true }
 zstd = { workspace = true, features = ["zstdmt"]}
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

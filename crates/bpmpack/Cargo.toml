@@ -26,6 +26,7 @@ tar       = { workspace = true }
 toml      = { workspace = true, features = ["preserve_order"] }
 tracing   = { workspace = true }
 uuid      = { workspace = true, features = ["v4"] }
+wild      = { workspace = true }
 zstd      = { workspace = true, features = ["zstdmt"]}
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 ignore    = "0.4.20"

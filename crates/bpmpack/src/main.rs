@@ -11,6 +11,6 @@ fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let matches = args::get_cli().get_matches();
-    cli_main(&matches)
+    let matches = args::get_cli().get_matches_from(wild::args());
+    main_cli(&matches)
 }

@@ -1163,7 +1163,7 @@ fn verify_symlinks(settings: &SymlinkSettings, listing: &FileListing) -> Result<
     Ok(())
 }
 
-pub fn cli_main(matches: &clap::ArgMatches) -> Result<()> {
+pub fn main_cli(matches: &clap::ArgMatches) -> Result<()> {
 
     match matches.subcommand() {
         Some(("list-files", matches)) => {

@@ -105,13 +105,13 @@ fn main() -> AResult<()> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let matches = args::get_cli().get_matches();
+    let matches = args::get_cli().get_matches_from(wild::args());
 
     // shortcut to bpm-pack, no config file needed
     #[cfg(feature = "pack")]
     match matches.subcommand() {
         Some(("pack", matches)) => {
-            return bpmpack::cli_main(matches);
+            return bpmpack::main_cli(matches);
         }
         _ => {}
     }
