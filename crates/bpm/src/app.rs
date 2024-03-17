@@ -18,6 +18,8 @@ pub struct App {
     pub config: config::Config,
     pub db: db::Db,
     pub db_loaded: bool,
+
+    pub provider_filter: provider::ProviderFilter,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -113,12 +115,19 @@ impl App {
         Ok(())
     }
 
+    /// iterate through providers with an applied filter
+    fn filtered_providers(&self) -> impl Iterator<Item=&provider::Provider> {
+        self.provider_filter.filter(&self.config.providers)
+    }
+
+    // -------------
+
     /// search and merge each provider's cached package info
     fn search_results(&self, pkg_name: &str, exact: bool) -> AResult<search::PackageList> {
 
         let mut merged_results = search::PackageList::new();
 
-        for provider in &self.config.providers {
+        for provider in self.filtered_providers() {
 
             // load the provider's cache file and merge it's results
             if let Ok(data) = provider.load_file() {
@@ -278,7 +287,6 @@ impl App {
         let versions = results.iter_mut().next().unwrap().1;
 
         // `which` could be a channel, check if it is
-        //let mut channel = None;
         let mut versioning = Versioning::default();
 
         if let Some(v) = which {
@@ -573,6 +581,7 @@ impl App {
         Ok(())
     }
 
+    /// `bpm update`
     pub fn update_packages_cmd(&mut self, pkgs: &[&String]) -> AResult<()> {
 
         // nothing to do if the db file doesn't exist yet, nothing to update
@@ -650,6 +659,49 @@ impl App {
         Ok(())
     }
 
+    /// `bpm pin`
+    /// Pin a package to a channel or the currently installed version
+    pub fn pin(&mut self, pkg_name: &str, channel: Option<&str>) -> AResult<()> {
+
+        self.load_db()?;
+        for pkg in &mut self.db.installed {
+            if pkg.metadata.name == pkg_name {
+                if let Some(channel) = channel {
+                    pkg.versioning.pinned_to_version = false;
+                    pkg.versioning.pinned_to_channel = true;
+                    pkg.versioning.channel = Some(channel.to_string());
+                } else {
+                    pkg.versioning.pinned_to_version = true;
+                    pkg.versioning.pinned_to_channel = false;
+                    pkg.versioning.channel = None;
+                }
+                self.save_db()?;
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("package not found");
+    }
+
+    /// `bpm unpin`
+    /// Unpin a package
+    pub fn unpin(&mut self, pkg_name: &str) -> AResult<()> {
+
+        self.load_db()?;
+        for pkg in &mut self.db.installed {
+            if pkg.metadata.name == pkg_name {
+                pkg.versioning.pinned_to_version = false;
+                pkg.versioning.pinned_to_channel = false;
+                pkg.versioning.channel = None;
+                self.save_db()?;
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("package not found");
+    }
+
+    /// `bpm verify`
     /// Verify package state.
     ///
     /// For installed packages listed in the db,
@@ -1037,7 +1089,8 @@ impl App {
         anyhow::bail!("package not installed")
     }
 
-    pub fn scan_cmd(&self, provider_filter: provider::ProviderFilter, debounce: std::time::Duration) -> AResult<()> {
+    /// `bpm scan`
+    pub fn scan_cmd(&self, debounce: std::time::Duration) -> AResult<()> {
 
         tracing::trace!("scanning providers");
 
@@ -1049,8 +1102,8 @@ impl App {
         if debounce.is_zero() {
             skip_scan = false;
         } else {
-            // if any provider needs scanning, scan all
-            for provider in provider_filter.filter(&self.config.providers) {
+            // if any provider needs scanning, scan all (not all, just ones in filter)
+            for provider in self.filtered_providers() {
                 if let Ok(data) = provider.load_file() {
                     let debounce_timepoint = data.scan_time + debounce;
                     if debounce_timepoint < now {
@@ -1070,7 +1123,7 @@ impl App {
         // make sure there is a cache/provider dir to cache search results in
         create_dir(join_path!(&self.config.cache_dir, "provider"))?;
 
-        for provider in provider_filter.filter(&self.config.providers) {
+        for provider in self.filtered_providers() {
 
             tracing::debug!("scanning {}", &provider.name);
             let list = provider.as_provide().scan();

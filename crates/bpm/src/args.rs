@@ -25,7 +25,7 @@ fn providers_arg() -> clap::Arg {
 pub fn get_cli() -> Command {
 
     let cli = Command::new("bpm")
-        .version("0.1.0")
+        .version("0.2.0")
         .about("bpm : A simple, generic, general-purpose package manager")
         .author("Bryan Splitgerber")
         .arg(arg!(-c --config <file> "use a specific config file"))
@@ -76,6 +76,7 @@ pub fn get_cli() -> Command {
                 .about("Install new packages")
                 .arg(arg!(<pkg> "package name or path to local package file"))
                 .arg(arg!(--"no-pin" "Do not pin to a specific version. Package may immediately be a candidate for updating."))
+                .arg(providers_arg())
         )
         .subcommand(
             Command::new("uninstall")
@@ -87,6 +88,7 @@ pub fn get_cli() -> Command {
             Command::new("update")
                 .about("Update packages")
                 .arg(arg!([pkg]... "package name or path to local package file"))
+                .arg(providers_arg())
         )
         .subcommand(
             Command::new("verify")
@@ -130,12 +132,17 @@ pub fn get_cli() -> Command {
                 // file sizes
                 // risked (files in owned dirs, that are not owned files)
         )
-        //.subcommand(
-        //    Command::new("pin")
-        //)
-        //.subcommand(
-        //    Command::new("unpin")
-        //)
+        .subcommand(
+            Command::new("pin")
+                .about("Pin a package to the version that is currently installed or to a channel")
+                .arg(arg!(<pkg> "Package being pinned"))
+                .arg(arg!(-c --channel <channel> "A channel to pin the package to"))
+        )
+        .subcommand(
+            Command::new("unpin")
+                .about("Unpin a package from a version or channel")
+                .arg(arg!(<pkg> "Package being pinned"))
+        )
         //.subcommand(
         //    Command::new("inspect")
         //)

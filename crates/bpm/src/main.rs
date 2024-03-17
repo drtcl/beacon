@@ -126,6 +126,7 @@ fn main() -> AResult<()> {
         config: config::Config::from_path(config_file).context("reading config file")?,
         db: db::Db::new(),
         db_loaded: false,
+        provider_filter: provider::ProviderFilter::empty(),
     };
 
     match matches.subcommand() {
@@ -153,8 +154,6 @@ fn main() -> AResult<()> {
         }
         Some(("scan", sub_matches)) => {
 
-            let provider_filter = args::parse_providers(sub_matches);
-
             let debounce = sub_matches.get_one::<String>("debounce");
             let debounce : std::time::Duration = if let Some(s) = debounce {
                 if let Ok(s) = s.parse::<u64>() {
@@ -168,12 +167,16 @@ fn main() -> AResult<()> {
                 std::time::Duration::from_secs(0)
             };
 
-            app.scan_cmd(provider_filter, debounce)?;
+            app.provider_filter = args::parse_providers(sub_matches);
+
+            app.scan_cmd(debounce)?;
         }
         Some(("install", sub_matches)) => {
 
             let no_pin = sub_matches.get_one::<bool>("no-pin").unwrap();
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
+
+            app.provider_filter = args::parse_providers(sub_matches);
             app.install_cmd(pkg_name, *no_pin)?;
         }
         Some(("uninstall", sub_matches)) => {
@@ -187,7 +190,18 @@ fn main() -> AResult<()> {
                 .get_many::<String>("pkg")
                 .map_or(Vec::new(), |given| given.collect());
 
+            app.provider_filter = args::parse_providers(sub_matches);
+
             app.update_packages_cmd(&pkg_names)?;
+        }
+        Some(("pin", sub_matches)) => {
+            let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
+            let channel = sub_matches.get_one::<String>("channel").map(String::as_str);
+            app.pin(pkg_name, channel)?;
+        }
+        Some(("unpin", sub_matches)) => {
+            let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
+            app.unpin(pkg_name)?;
         }
         Some(("verify", sub_matches)) => {
 

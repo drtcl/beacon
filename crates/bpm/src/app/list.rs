@@ -13,14 +13,15 @@ impl App {
                 let json = *sub_matches.get_one::<bool>("json").unwrap();
                 let oneline = *sub_matches.get_one::<bool>("oneline").unwrap();
                 let name = sub_matches.get_one::<String>("pkg");
-                let provider_filter = args::parse_providers(sub_matches);
                 let channels = args::pull_many_opt(sub_matches, "channels");
                 let limit = *sub_matches.get_one::<u32>("limit").unwrap();
-                self.list_available_cmd(name, exact, oneline, json, provider_filter, channels, limit)?;
+
+                self.provider_filter = args::parse_providers(sub_matches);
+                self.list_available_cmd(name, exact, oneline, json, channels, limit)?;
             }
             Some(("channels", sub_matches)) => {
-                let provider_filter = args::parse_providers(sub_matches);
-                self.list_channels_cmd(provider_filter)?;
+                self.provider_filter = args::parse_providers(sub_matches);
+                self.list_channels_cmd()?;
             }
             Some(("installed", _sub_matches)) => {
                 self.list_installed()?;
@@ -56,10 +57,10 @@ impl App {
     }
 
     /// list channels for a given package, or all packages
-    pub fn list_channels_cmd(&mut self, provider_filter: provider::ProviderFilter) -> Result<()> {
+    pub fn list_channels_cmd(&mut self) -> Result<()> {
 
         let mut combined = search::PackageList::new();
-        for provider in provider_filter.filter(&self.config.providers) {
+        for provider in self.filtered_providers() {
             if let Ok(data) = provider.load_file() {
                 combined = search::merge_package_lists(combined, data.packages);
             }
@@ -93,13 +94,12 @@ impl App {
         exact: bool,
         oneline: bool,
         json: bool,
-        provider_filter: provider::ProviderFilter,
         channels: Option<Vec<&String>>,
         limit: u32
     ) -> Result<()> {
 
         let mut combined = search::PackageList::new();
-        for provider in provider_filter.filter(&self.config.providers) {
+        for provider in self.filtered_providers() {
             if let Ok(data) = provider.load_file() {
                 combined = search::merge_package_lists(combined, data.packages);
             }
