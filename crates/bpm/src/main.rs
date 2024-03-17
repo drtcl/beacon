@@ -173,11 +173,12 @@ fn main() -> AResult<()> {
         }
         Some(("install", sub_matches)) => {
 
-            let no_pin = sub_matches.get_one::<bool>("no-pin").unwrap();
+            let no_pin = *sub_matches.get_one::<bool>("no-pin").unwrap();
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
+            let update = *sub_matches.get_one::<bool>("update").unwrap();
 
             app.provider_filter = args::parse_providers(sub_matches);
-            app.install_cmd(pkg_name, *no_pin)?;
+            app.install_cmd(pkg_name, no_pin, update)?;
         }
         Some(("uninstall", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();

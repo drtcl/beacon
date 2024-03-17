@@ -76,6 +76,7 @@ pub fn get_cli() -> Command {
                 .about("Install new packages")
                 .arg(arg!(<pkg> "package name or path to local package file"))
                 .arg(arg!(--"no-pin" "Do not pin to a specific version. Package may immediately be a candidate for updating."))
+                .arg(arg!(-U --update "Install a different version of an already installed package. No effect if pkg is not already installed."))
                 .arg(providers_arg())
         )
         .subcommand(

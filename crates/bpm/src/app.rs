@@ -30,6 +30,13 @@ pub struct Versioning {
 }
 
 impl Versioning {
+    fn unpinned() -> Self {
+        Self {
+            pinned_to_version: false,
+            pinned_to_channel: false,
+            channel: None,
+        }
+    }
     fn pinned_version() -> Self {
         Self {
             pinned_to_version: true,
@@ -379,9 +386,24 @@ impl App {
         return self.install_pkg_file(cache_path, Versioning::pinned_version());
     }
 
+//    /// check if a given user arg is a path to a pacakge file on the fs
+//    fn is_package_file_arg(arg: &str) -> bool {
+//        let path = Utf8Path::new(arg);
+//        if let Ok(true) = path.try_exists() {
+//            tracing::trace!(path=?path, "testing if file path looks like a package");
+//            let filename = path.file_name();
+//            if let Some(filename) = filename && package::is_packagefile_name(filename) {
+//                return true;
+//            } else {
+//                //anyhow::bail!("invalid package file")
+//            }
+//        }
+//        false
+//    }
+
     /// subcommand for installing a package
     /// `bpm install`
-    pub fn install_cmd(&mut self, pkg_name: &String, no_pin: bool) -> AResult<()> {
+    pub fn install_cmd(&mut self, pkg_name: &String, no_pin: bool, update: bool) -> AResult<()> {
 
         self.create_load_db()?;
 
@@ -415,17 +437,37 @@ impl App {
             Some(name) => name,
         };
 
-        let (listing, mut versioning) = self.find_package_version(pkg_name, split.next())?;
+        let version = split.next();
+
+        let (listing, mut versioning) = self.find_package_version(pkg_name, version)?;
         let version = Version::new(&listing.version);
 
         if no_pin {
             versioning.pinned_to_version = false;
         }
 
-        //dbg!(&listing);
-        //dbg!(&versioning);
-        //dbg!(&no_pin);
-        //dbg!(&version);
+        let current_install = self.db.installed.iter().find(|p| p.metadata.name == pkg_name);
+        let mut already_installed = current_install.is_some();
+        let mut version_same = false;
+
+        // check if the package is already installed
+        if let Some(current) = &current_install {
+            already_installed = true;
+            version_same = current.metadata.version == version.as_str();
+
+            if version_same {
+                println!("No change. Package {} at version {} is already intalled", pkg_name, version);
+                return Ok(());
+            } else if !update {
+                println!("Package {} ({}) is already installed. Pass --update to install a different version.", pkg_name, current.metadata.version);
+                return Ok(());
+            } else {
+                println!("Package {} updating from verson {} to {}.", pkg_name, current.metadata.version, version);
+            }
+        }
+
+        println!("already_installed {}", already_installed);
+        println!("version_same {}", version_same);
 
         tracing::debug!(pkg_name, version=version.as_str(), "installing from provider");
 
@@ -436,10 +478,17 @@ impl App {
 
         let cached_file = self.cache_package_require(&id)?;
 
-        tracing::debug!("installing {pkg_name} {version}");
-        return self.install_pkg_file(cached_file, versioning);
+        if already_installed {
+            let existing_version = &current_install.unwrap().metadata.version;
+            tracing::debug!("updating {pkg_name} {existing_version} -> {version}");
+            return self.update_inplace(pkg_name, cached_file, versioning);
+        } else {
+            tracing::debug!("installing {pkg_name} {version}");
+            return self.install_pkg_file(cached_file, versioning);
+        }
     }
 
+    /// `bpm uninstall` or `bpm remove`
     /// uninstall a package
     pub fn uninstall_cmd(&mut self, pkg_name: &String) -> AResult<()> {
         // from the package name,
@@ -468,7 +517,8 @@ impl App {
         Ok(())
     }
 
-    fn update_inplace(&mut self, pkg_name: String, new_pkg_file: Utf8PathBuf, versioning: Versioning) -> AResult<()> {
+    /// install a different version of a package in-place (on top of) the existing version
+    fn update_inplace(&mut self, pkg_name: &str, new_pkg_file: Utf8PathBuf, versioning: Versioning) -> AResult<()> {
 
         let cache_file = &new_pkg_file;
         tracing::trace!("update_inplace {cache_file:?}");
@@ -496,7 +546,7 @@ impl App {
             if let Some(old_file) = old_file {
                 if old_file.filetype != new_file.filetype {
                 } else {
-                    // same path and type, can keep it around
+                    // same path and type, the file will be kept
                     old_files.remove_entry(path);
                 }
             }
@@ -652,7 +702,7 @@ impl App {
         for (pkg_name, _oldv, _newv, versioning, new_pkg_file) in updates {
             dbg!(&pkg_name);
             dbg!(&new_pkg_file);
-            let _ok = self.update_inplace(pkg_name, new_pkg_file, versioning)?;
+            let _ok = self.update_inplace(&pkg_name, new_pkg_file, versioning)?;
             dbg!(_ok);
         }
 
@@ -667,13 +717,9 @@ impl App {
         for pkg in &mut self.db.installed {
             if pkg.metadata.name == pkg_name {
                 if let Some(channel) = channel {
-                    pkg.versioning.pinned_to_version = false;
-                    pkg.versioning.pinned_to_channel = true;
-                    pkg.versioning.channel = Some(channel.to_string());
+                    pkg.versioning = Versioning::pinned_channel(channel);
                 } else {
-                    pkg.versioning.pinned_to_version = true;
-                    pkg.versioning.pinned_to_channel = false;
-                    pkg.versioning.channel = None;
+                    pkg.versioning = Versioning::pinned_version();
                 }
                 self.save_db()?;
                 return Ok(());
@@ -690,9 +736,7 @@ impl App {
         self.load_db()?;
         for pkg in &mut self.db.installed {
             if pkg.metadata.name == pkg_name {
-                pkg.versioning.pinned_to_version = false;
-                pkg.versioning.pinned_to_channel = false;
-                pkg.versioning.channel = None;
+                pkg.versioning = Versioning::unpinned();
                 self.save_db()?;
                 return Ok(());
             }
@@ -890,33 +934,26 @@ impl App {
         let mut dirs = Vec::new();
 
         for (filepath, fileinfo) in files {
-            //let path = PathBuf::from(filepath.as_ref());
 
             let filepath = filepath.as_ref();
             let exists = matches!(filepath.try_exists(), Ok(true));
 
             match &fileinfo.filetype {
                 package::FileType::Link(to) => {
-                    //let path = build_pkg_file_path(pkg, filepath)?;
                     println!("removing {filepath:?} -> {to}");
-                    //println!("         {}", path.display());
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
-                        eprintln!("error deleting {}", filepath);
+                        eprintln!("error deleting {}: {}", filepath, e);
                     }
                 }
                 package::FileType::File => {
-                    //let path = build_pkg_file_path(pkg, filepath)?;
                     println!("removing {filepath:?}");
-                    //println!("         {}", path.display());
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
-                        eprintln!("error deleting {}", filepath);
+                        eprintln!("error deleting {}: {}", filepath, e);
                     }
                 }
                 package::FileType::Dir => {
-                    //let path = build_pkg_file_path(pkg, filepath)?;
-                    //dirs.push(path);
                     dirs.push(filepath.to_path_buf());
                 }
             }
@@ -946,41 +983,6 @@ impl App {
         });
 
         Self::delete_files(iter)
-
-//        //dbg!(pkg);
-//
-//        let mut dirs = Vec::new();
-//
-//        for (filepath, fileinfo) in &pkg.metadata.files {
-//            //println!("removing {filepath}");
-//            //dbg!(fileinfo);
-//            match &fileinfo.filetype {
-//                package::FileType::Link(to) => {
-//                    let path = build_pkg_file_path(pkg, filepath)?;
-//                    println!("removing {filepath} -> {to}");
-//                    println!("         {}", path.display());
-//                    std::fs::remove_file(path)?;
-//                }
-//                package::FileType::File => {
-//                    let path = build_pkg_file_path(pkg, filepath)?;
-//                    println!("removing {filepath}");
-//                    println!("         {}", path.display());
-//                    std::fs::remove_file(path)?;
-//                }
-//                package::FileType::Dir => {
-//                    let path = build_pkg_file_path(pkg, filepath)?;
-//                    dirs.push(path);
-//                }
-//            }
-//        }
-//
-//        dirs.reverse();
-//        for path in dirs {
-//            println!("removing dir {}", path.display());
-//            std::fs::remove_dir(path)?;
-//        }
-//
-//        Ok(())
     }
 
     /// `bpm query owner <file>`
