@@ -18,7 +18,7 @@ pub fn build_cli(cmd: clap::Command) -> clap::Command {
         .after_help("With no <COMMAND>, build a package.")
         .subcommand(
             Command::new("set-version")
-                .about("Take an unversioned package and built a new package that is versioned")
+                .about("Take an unversioned package and build a new package that is versioned")
                 .arg(arg!(<pkgfile> "package file to version"))
                 .arg(arg!(--version <version> "The package's version")
                     .required(true)

@@ -182,8 +182,8 @@ fn main() -> AResult<()> {
         }
         Some(("uninstall", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
-            println!("removing package {pkg_name}");
-            app.uninstall_cmd(pkg_name)?;
+            let verbose = *sub_matches.get_one::<bool>("verbose").unwrap();
+            app.uninstall_cmd(pkg_name, verbose)?;
         }
         Some(("update", sub_matches)) => {
 

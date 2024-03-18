@@ -25,7 +25,7 @@ fn providers_arg() -> clap::Arg {
 pub fn get_cli() -> Command {
 
     let cli = Command::new("bpm")
-        .version("0.2.0")
+        .version("0.2.1")
         .about("bpm : A simple, generic, general-purpose package manager")
         .author("Bryan Splitgerber")
         .arg(arg!(-c --config <file> "use a specific config file"))
@@ -76,14 +76,16 @@ pub fn get_cli() -> Command {
                 .about("Install new packages")
                 .arg(arg!(<pkg> "package name or path to local package file"))
                 .arg(arg!(--"no-pin" "Do not pin to a specific version. Package may immediately be a candidate for updating."))
-                .arg(arg!(-U --update "Install a different version of an already installed package. No effect if pkg is not already installed."))
+                .arg(arg!(-u --update "Install a different version of an already installed package. No effect if pkg is not already installed."))
                 .arg(providers_arg())
         )
         .subcommand(
             Command::new("uninstall")
-                .alias("remove")
+                //.alias("remove")
+                .visible_alias("remove")
                 .about("remove installed packages")
                 .arg(arg!(<pkg> "package name or path to local package file"))
+                .arg(arg!(-v --verbose))
         )
         .subcommand(
             Command::new("update")
@@ -113,6 +115,7 @@ pub fn get_cli() -> Command {
                     .arg(arg!(<file> "The file to find the owner of"))
                 )
                 .subcommand(Command::new("list-files").about("Query the list of files from a package")
+                    .alias("files")
                     .arg(arg!(<pkg> "The package to list the files of"))
                     .arg(arg!(--depth <n> "Maximum depth. Toplevel is depth 1.")
                         .value_parser(clap::value_parser!(u32))
@@ -165,11 +168,11 @@ pub fn get_cli() -> Command {
                         .arg(arg!(<pkg> "Package name or filepath to touch"))
                         .arg(arg!(--duration <time> "How much time to add to retention"))
                 )
-                .subcommand(
-                    Command::new("fetch")
-                        .about("Fetch a package and store it in the cache")
-                        .arg(arg!(<pkg>... "Package name(s) to fetch"))
-                )
+                //.subcommand(
+                //    Command::new("fetch")
+                //        .about("Fetch a package and store it in the cache")
+                //        .arg(arg!(<pkg>... "Package name(s) to fetch"))
+                //)
         );
 
     #[cfg(feature = "pack")]
