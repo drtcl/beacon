@@ -4,6 +4,10 @@
 #![feature(extract_if)]
 #![feature(let_chains)]
 
+
+#[cfg(all(feature="rustls", feature="nativessl"))]
+std::compile_error!("Use either rustls or nativessl feature, not both.");
+
 use std::collections::HashMap;
 use anyhow::Result;
 use tracing::trace;
@@ -171,7 +175,7 @@ fn scrape_links_from(client: &Client, url: &Url) -> Result<Vec<Link>> {
 
 /// Scan an http server for packages
 /// Accepted directory structures:
-/// ```
+/// ```ignore
 /// 1) flat -- packages listed at root
 ///     pkg/
 ///         foo-1.0.0.bpm

@@ -13,17 +13,15 @@ camino = { workspace = true, features = ["serde1"] }
 indicatif = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_derive = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true } 
 tar = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 zstd = { workspace = true, features = ["zstdmt"] }
 
-#serde_yaml = { version = "0.9.21", optional = true }
-
-[features]
-default = ["json"]
+#[features]
+#default = ["json"]
 #toml = ["dep:toml"]
 #yaml = ["dep:serde_yaml"]
-json = ["dep:serde_json"]
+#json = ["dep:serde_json"]

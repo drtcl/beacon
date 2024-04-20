@@ -37,19 +37,15 @@ impl Provider {
 
         const FS_PRE: &str = "fs://";
         const HTTP_PRE: &str = "http://";
-        //const HTTPS_PRE: &str = "https://";
+        const HTTPS_PRE: &str = "https://";
 
         let inner: Box<dyn Provide>;
 
         if uri.starts_with(FS_PRE) {
-
             let uri = uri.strip_prefix(FS_PRE).unwrap();
             inner = Box::new(source::filesystem::FileSystem::new(uri));
-
-        } else if uri.starts_with(HTTP_PRE) {
-
+        } else if uri.starts_with(HTTP_PRE) || uri.starts_with(HTTPS_PRE) {
             inner = Box::new(source::http::Http::new(uri.clone()));
-
         } else {
             return Err(anyhow::anyhow!("invalid provider '{}'", uri))
         }

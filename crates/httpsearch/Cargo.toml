@@ -20,6 +20,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-reqwest = { version = "0.11.14", default-features=false, features = ["rustls-tls", "blocking"] }
+reqwest = { version = "0.11.14", default-features=false, features = ["blocking"] }
 scraper = "0.15.0"
 url = "2.4.0"
+
+[features]
+default = []
+rustls = ["reqwest/rustls-tls"]
+nativessl = ["reqwest/native-tls"]
+nativessl-vendored = ["reqwest/native-tls-vendored"]

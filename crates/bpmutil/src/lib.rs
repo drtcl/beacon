@@ -14,12 +14,11 @@ pub fn get_mtime(path: impl AsRef<str>) -> Option<u64> {
     std::fs::symlink_metadata(path.as_ref()).ok()
         .and_then(|md| md.modified().ok())
         .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|mtime| Some(mtime.as_secs()))
+        .map(|mtime| mtime.as_secs())
 }
 
 pub fn get_filesize(path: &str) -> std::io::Result<u64> {
-    std::fs::symlink_metadata(path)
-        .and_then(|f| Ok(f.len()))
+    std::fs::symlink_metadata(path).map(|f| f.len())
 }
 
 #[derive(Debug, Default)]
@@ -52,7 +51,7 @@ pub fn get_filestate(path: &Utf8Path) -> FileState {
         if state.file {
             state.mtime = md.modified().ok()
                 .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-                .and_then(|mtime| Some(mtime.as_secs()));
+                .map(|mtime| mtime.as_secs());
         }
     }
 

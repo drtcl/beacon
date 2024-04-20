@@ -35,7 +35,6 @@ pub const META_FILE_NAME: &str = "meta.yaml";
 #[cfg(feature = "toml")]
 pub const META_FILE_NAME: &str = "meta.toml";
 
-#[cfg(feature = "json")]
 pub const META_FILE_NAME: &str = "meta.json";
 
 pub const DATA_FILE_NAME: &str = "data.tar.zst";
@@ -153,18 +152,15 @@ impl From<&FileInfo> for FileInfoString {
         }
 
         // symlink to
-        match &info.filetype {
-            FileType::Link(to) => {
-                ret.push(':');
-                ret.push_str(to);
-            }
-            _ => { }
+        if let FileType::Link(to) = &info.filetype {
+            ret.push(':');
+            ret.push_str(to);
         }
 
         // hash
         ret.push(':');
         if let Some(hash) = &info.hash {
-            ret.push_str(&hash);
+            ret.push_str(hash);
         }
 
         // mtime
@@ -292,14 +288,12 @@ impl MetaData {
         Ok(ret)
     }
 
-    #[cfg(feature = "json")]
     pub fn to_writer<W: Write>(&self, w: &mut W) -> Result<()> {
         //serde_json::to_writer(w, self)?;
         serde_json::to_writer_pretty(w, self)?;
         Ok(())
     }
 
-    #[cfg(feature = "json")]
     pub fn from_reader<R: Read>(r: &mut R) -> Result<Self> {
         let ret: Self = serde_json::from_reader(r)?;
         Ok(ret)
@@ -365,8 +359,7 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
             " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
         ).unwrap());
 
-        let computed_sum = blake3_hash_reader(&mut pbar.wrap_read(&mut data))?;
-        computed_sum
+        blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
     };
     let matches = &computed_sum == described_sum;
     tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
@@ -532,6 +525,7 @@ mod test {
             data_size: 0,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
+            uuid: "".into(),
         };
 
         meta.add_dependency(DependencyID {

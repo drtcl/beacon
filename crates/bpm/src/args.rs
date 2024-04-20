@@ -52,7 +52,7 @@ pub fn get_cli() -> Command {
                     .arg(arg!(--exact  "match package name exactly"))
                     .arg(providers_arg())
                     .arg(arg!(--json "output in json lines format"))
-                    .arg(arg!(--oneline "output in one packger per line format")
+                    .arg(arg!(--oneline "output in one package per line format")
                         .conflicts_with("json")
                     )
                     .arg(arg!(--limit <N> "Limit to the N latest versions per package")

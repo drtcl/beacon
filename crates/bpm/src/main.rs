@@ -109,11 +109,8 @@ fn main() -> AResult<()> {
 
     // shortcut to bpm-pack, no config file needed
     #[cfg(feature = "pack")]
-    match matches.subcommand() {
-        Some(("pack", matches)) => {
-            return bpmpack::main_cli(matches);
-        }
-        _ => {}
+    if let Some(("pack", matches)) = matches.subcommand() {
+        return bpmpack::main_cli(matches);
     }
 
     // find the config file

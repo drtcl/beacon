@@ -95,7 +95,7 @@ pub fn build_cli(cmd: clap::Command) -> clap::Command {
              .value_parser(clap::value_parser!(u32))
              .default_value("0")
         )
-        .arg(arg!(threads: -T <threads> "number of threads to use during compression. 0=core count, Default=0")
+        .arg(arg!(threads: -T <threads> "number of threads to use during compression. 0=# of CPUs")
              .value_parser(clap::value_parser!(u8))
              .default_value("0")
              // negative values are not actually accepted, but this gives a better error message

@@ -147,7 +147,7 @@ fn parse_modes_file(path: &Utf8Path) -> Result<Vec<ModeGlob>> {
                 continue;
             }
 
-            let mut parts = line.trim().split(' ').filter(|s| *s != "");
+            let mut parts = line.trim().split(' ').filter(|s| !s.is_empty());
 
             let mut entry = ModeGlob::default();
 
@@ -156,7 +156,7 @@ fn parse_modes_file(path: &Utf8Path) -> Result<Vec<ModeGlob>> {
 
             entry.glob = String::from(glob);
 
-            for mode in modes.split(',').filter(|s| *s != "") {
+            for mode in modes.split(',').filter(|s| !s.is_empty()) {
                 match mode {
                     "volatile" | "v" =>  {
                         entry.modes.volatile = true;
@@ -553,11 +553,7 @@ pub fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
                 }
             }
             if verbose || !parent_ignored {
-                let reason = if let Some(reason) = &file.ignore_reason {
-                    Some(format!("({} {})", reason.file, reason.pattern))
-                } else {
-                    None
-                };
+                let reason = file.ignore_reason.as_ref().map(|reason| format!("({} {})", reason.file, reason.pattern));
                 let reason = reason.as_deref().unwrap_or("");
                 writeln!(&mut tw, "I\t{}  {}", file.pkg_path, reason)?;
             }
@@ -608,8 +604,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let thread_count = get_threads(*matches.get_one::<u8>("threads").expect("expected thread count") as u32);
 
     let deps: Vec<(String, Option<String>)> = matches.get_many::<String>("depend")
-        .map(|refs| refs.into_iter().map(|s| s.to_string()).collect())
-        .unwrap_or(Vec::new())
+        .map(|refs| refs.into_iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .unwrap_or_default()
         .iter()
         .map(|s| {
             let mut iter = s.split('@');
@@ -1188,7 +1184,7 @@ pub fn main_cli(matches: &clap::ArgMatches) -> Result<()> {
             //unreachable!();
         //}
         None => {
-            make_package(&matches)?;
+            make_package(matches)?;
         }
     }
 

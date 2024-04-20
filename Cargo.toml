@@ -16,6 +16,11 @@ members = [
     "crates/zstd_patch",
 ]
 
+default-members = [
+    "crates/bpm",
+    "crates/bpmpack",
+]
+
 [profile.release]
 debug = false
 strip = true
@@ -31,27 +36,33 @@ panic = "abort"
 
 [workspace.lints.clippy]
 needless_return = "allow"
+let_and_return = "allow"
 
 [workspace.dependencies]
-anyhow = "1.0.69"
-blake3 = "1.3.3"
-camino = "1.1.1"
-chrono = { version = "0.4.23", features = ["serde"] }
-clap = "4.1.4"
-indicatif = "0.17.3"
-regex = "1.7.0"
-semver = "1.0.16"
-serde = { version = "1.0.152", features = ["derive"] }
-serde_derive = "1.0.152"
-serde_json = "1.0.93"
-tabwriter = "1.2.1"
-tar = "0.4.38"
-toml = "0.7.2"
-tracing = "0.1.37"
-tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
-uuid = { version = "1.5.0", features = ["v4"] }
-walkdir = "2.3.2"
-wild = "2.2.0"
-zstd = "0.12.0"
-
-#serde_yaml = "0.9.19"
+anyhow = "1.0.82"
+blake3 = "1.5.1"
+camino = "1.1.6"
+chrono = { version = "0.4.38", features = ["serde"] }
+clap = "4.5.4"
+directories = "5.0.1"
+humansize = "2.1.3"
+humantime = "2.1.0"
+ignore    = "0.4.22"
+indicatif = "0.17.8"
+itertools = "0.12.1"
+regex = "1.10.4"
+semver = "1.0.22"
+serde = { version = "1.0.199", features = ["derive"] }
+serde_derive = "1.0.199"
+serde_json = "1.0.116"
+tabwriter = "1.4.0"
+tar = "0.4.40"
+tempfile  = "3.10.1"
+toml = "0.8.12"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+uuid = { version = "1.8.0", features = ["v4"] }
+version-compare = "0.2.0"
+walkdir = "2.5.0"
+wild = "2.2.1"
+zstd = "0.13.1"

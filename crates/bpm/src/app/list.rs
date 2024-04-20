@@ -135,7 +135,7 @@ impl App {
 
         for (name, versions) in &combined {
             let mut sorted = Vec::new();
-            versions.into_iter().map(|(v, i)| (version::Version::new(&v), i)).collect_into(&mut sorted);
+            versions.iter().map(|(v, i)| (version::Version::new(v), i)).collect_into(&mut sorted);
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
             // limit to N number of versions per package

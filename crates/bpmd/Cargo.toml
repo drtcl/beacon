@@ -7,8 +7,10 @@ edition = "2021"
 
 [dependencies]
 axum = "0.6.16"
+package = { path = "../package" }
 serde = { version = "1.0.160", features = ["derive"] }
 tokio = { version = "1.27.0", features = ["full"] }
 tower-http = { version = "0.4.1", features = ["fs"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
+walkdir.workspace = true

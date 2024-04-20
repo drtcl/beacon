@@ -180,7 +180,7 @@ impl App {
 
         let pkg_name;
         let pkg_version;
-        match (package::is_packagefile_name(&package_file_filename), package::split_parts(package_file_filename)) {
+        match (package::is_packagefile_name(package_file_filename), package::split_parts(package_file_filename)) {
             (true, Some((n, v))) => {
                 pkg_name = n;
                 pkg_version = v;
@@ -206,7 +206,7 @@ impl App {
             anyhow::bail!("failed to installed {}, package file is corrupt. Package name does not match package metadata.", pkg_name);
         }
         // version must match
-        if metadata.version != pkg_version.to_string() {
+        if metadata.version != pkg_version {
             anyhow::bail!("failed to installed {}, package file is corrupt. Package version does not match package metadata.", pkg_name);
         }
 
@@ -362,7 +362,7 @@ impl App {
     ///
     /// `bpm install foo` or `bpm install foo@1.2.3` or `bpm install path/to/foo_1.2.3.bpm`
     /// install a package from a provider or directly from a file
-    pub fn install_cmd(&mut self, pkg_name_or_filepath: &String, no_pin: bool, update: bool) -> AResult<()> {
+    pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool) -> AResult<()> {
 
         self.create_load_db()?;
 
@@ -400,7 +400,7 @@ impl App {
 
             let v = split.next();
 
-            let (listing, mut _versioning) = self.find_package_version(&pkg_name, v)?;
+            let (listing, mut _versioning) = self.find_package_version(pkg_name, v)?;
             versioning = _versioning;
             version = Version::new(&listing.version);
         }
@@ -443,7 +443,7 @@ impl App {
         if already_installed {
             let existing_version = &current_install.unwrap().metadata.version;
             tracing::debug!("updating {pkg_name} {existing_version} -> {version}");
-            return self.update_inplace(&pkg_name, cached_file, versioning);
+            return self.update_inplace(pkg_name, cached_file, versioning);
         } else {
             tracing::debug!("installing {pkg_name} {version}");
             return self.install_pkg_file(cached_file, versioning);
@@ -878,7 +878,7 @@ impl App {
                     }
                 }
 
-                println!("> {} -- {}", pkg.metadata.name, "RESTORED");
+                println!("> {} -- RESTORED", pkg.metadata.name);
             }
         }
 
@@ -1064,7 +1064,8 @@ impl App {
         if debounce.is_zero() {
             skip_scan = false;
         } else {
-            // if any provider needs scanning, scan all (not all, just ones in filter)
+            // If any provider needs scanning, scan all (not all, just ones in filter).
+            // A provider needs scan if the file doesn't exist.
             for provider in self.filtered_providers() {
                 if let Ok(data) = provider.load_file() {
                     let debounce_timepoint = data.scan_time + debounce;
@@ -1073,6 +1074,9 @@ impl App {
                     }
                     tracing::trace!("{:-18} {:?}", &provider.name, data.scan_time);
                     tracing::trace!("debounce_timepoint {:?} {}", debounce_timepoint, tern!(now > debounce_timepoint, "scan!", "skip"));
+                } else {
+                    tracing::trace!("error loading file, scanning");
+                    skip_scan = false;
                 }
             }
         }

@@ -73,7 +73,7 @@ impl Report {
 
 /// Scan a directory for packages
 /// Accepted directory structures:
-/// ```
+/// ```ignore
 /// 1) flat -- packages listed at root
 ///     pkg/
 ///         foo-1.0.0.bpm
