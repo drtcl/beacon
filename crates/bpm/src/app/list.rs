@@ -9,9 +9,9 @@ impl App {
     pub fn list_cmd(&mut self, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some(("available", sub_matches)) => {
-                let exact = *sub_matches.get_one::<bool>("exact").unwrap();
-                let json = *sub_matches.get_one::<bool>("json").unwrap();
-                let oneline = *sub_matches.get_one::<bool>("oneline").unwrap();
+                let exact = sub_matches.get_flag("exact");
+                let json = sub_matches.get_flag("json");
+                let oneline = sub_matches.get_flag("oneline");
                 let name = sub_matches.get_one::<String>("pkg");
                 let channels = args::pull_many_opt(sub_matches, "channels");
                 let limit = *sub_matches.get_one::<u32>("limit").unwrap();

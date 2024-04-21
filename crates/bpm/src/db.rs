@@ -34,10 +34,6 @@ pub struct DbPkg {
     pub metadata: package::MetaData,
 
     pub package_file_filename: Option<String>
-
-    //pub id: PackageID,
-    //pub files: Vec<(FilePath, HashString)>,
-    //pub files: Vec<FileInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,6 +45,10 @@ pub struct CacheFile {
     pub touched: chrono::DateTime<chrono::offset::Utc>,
 
     pub in_use: bool,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,19 +135,25 @@ impl Db {
     //    Db::from_reader(file)
     //}
 
-    pub fn cache_touch(&mut self, filename: &str) {
+    pub fn cache_touch(&mut self, filename: &str, duration: Option<std::time::Duration>) {
         match self.cache_files.iter_mut().find(|e| e.filename == filename) {
             Some(ent) => {
                 ent.touched = chrono::Utc::now().round_subsecs(0);
+                ent.retention = duration;
             },
             None => {
                 self.cache_files.push(CacheFile {
                     touched: chrono::Utc::now().round_subsecs(0),
                     filename: filename.to_string(),
                     in_use: false,
+                    retention: duration,
                 });
             }
         }
+    }
+
+    pub fn cache_evict(&mut self, filename: &str) {
+        self.cache_files.retain(|ent| ent.filename != filename);
     }
 
     pub fn cache_unuse_all_versions(&mut self, pkg_name: &str) {
@@ -170,6 +176,7 @@ impl Db {
                     touched: chrono::Utc::now().round_subsecs(0),
                     filename: filename.to_string(),
                     in_use,
+                    retention: None,
                 });
             }
         }

@@ -25,7 +25,7 @@ fn providers_arg() -> clap::Arg {
 pub fn get_cli() -> Command {
 
     let cli = Command::new("bpm")
-        .version("0.2.1")
+        .version(clap::crate_version!())
         .about("bpm : A simple, generic, general-purpose package manager")
         .author("Bryan Splitgerber")
         .arg(arg!(-c --config <file> "use a specific config file"))
@@ -74,9 +74,10 @@ pub fn get_cli() -> Command {
         .subcommand(
             Command::new("install")
                 .about("Install new packages")
-                .arg(arg!(<pkg> "package name or path to local package file"))
+                .arg(arg!(<pkg> "Package name or path to local package file."))
                 .arg(arg!(--"no-pin" "Do not pin to a specific version. Package may immediately be a candidate for updating."))
                 .arg(arg!(-u --update "Install a different version of an already installed package. No effect if pkg is not already installed."))
+                .arg(arg!(--reinstall "Allow installing the same version again."))
                 .arg(providers_arg())
         )
         .subcommand(
@@ -97,7 +98,8 @@ pub fn get_cli() -> Command {
             Command::new("verify")
                 .about("Perform consistency check on package state")
                 .arg(arg!([pkg]... "Package name(s) to verify. If no package is specified, verify all."))
-                .arg(arg!(--restore "Restore files that have been modified to original installation state"))
+                .arg(arg!(--restore "Restore files that have been modified to original installation state. Does not restore volatile files."))
+                .arg(arg!(--"restore-volatile" "Also restore volatile files. No effect if --restore is not given"))
                 .arg(arg!(--mtime "Enable mtime verification"))
                 .arg(arg!(-v --verbose "Ouput extra information"))
         )
@@ -159,20 +161,32 @@ pub fn get_cli() -> Command {
         .subcommand(
             Command::new("cache").about("cache management")
                 .subcommand(
-                    Command::new("clear")
-                        .about("clear the cache") //TODO explain
+                    Command::new("list")
+                        .about("List cached package files and when they expire")
+                )
+                .subcommand(
+                    Command::new("fetch")
+                        .about("Fetch a package and store it in the cache")
+                        .arg(arg!(<pkg>... "Package name(s) to fetch"))
                 )
                 .subcommand(
                     Command::new("touch")
-                        .about("extend the cache lifetime of a package file")
-                        .arg(arg!(<pkg> "Package name or filepath to touch"))
-                        .arg(arg!(--duration <time> "How much time to add to retention"))
+                        .about("Extend the cache lifetime of a package file")
+                        .arg(arg!(<pkg> "The package to evict"))
+                        .arg(arg!(-v --version <version> "Which version, otherwise assume all versions."))
+                        .arg(arg!(-d --duration <time> "When to expire, time fom now."))
                 )
-                //.subcommand(
-                //    Command::new("fetch")
-                //        .about("Fetch a package and store it in the cache")
-                //        .arg(arg!(<pkg>... "Package name(s) to fetch"))
-                //)
+                .subcommand(
+                    Command::new("clear")
+                        .about("Clear the cache") //TODO explain
+                )
+                .subcommand(
+                    Command::new("evict")
+                        .about("Remove a package from the cache")
+                        .arg(arg!(<pkg> "The package to evict"))
+                        .arg(arg!(-v --version <version> "Which version, otherwise assume all versions."))
+                        .arg(arg!(--"in-use" "Allow evicting package files that are currently in use"))
+                )
         );
 
     #[cfg(feature = "pack")]

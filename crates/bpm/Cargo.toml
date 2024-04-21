@@ -1,6 +1,6 @@
 [package]
 name = "bpm"
-version = "0.2.1"
+version = "0.2.2-alpha"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,9 +18,9 @@ bpmpack    = { path = "../bpmpack", optional=true }
 
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-camino = { workspace = true, features = ["serde1"]}
-chrono = { workspace = true, features = ["serde"]}
-clap = { workspace = true }
+camino = { workspace = true, features = ["serde1"] }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["cargo"] }
 directories = { workspace = true }
 humantime = { workspace = true }
 indicatif = { workspace = true }
@@ -38,10 +38,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 version-compare = { workspace = true }
 walkdir = { workspace = true }
 wild = { workspace = true }
-zstd = { workspace = true, features = ["zstdmt"]}
+zstd = { workspace = true, features = ["zstdmt"] }
 
 [features]
-default = ["pack"]
+default = ["pack", "rustls"]
 pack = ["dep:bpmpack"]
 
 # httpsearch tls options

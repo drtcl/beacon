@@ -129,17 +129,32 @@ fn main() -> AResult<()> {
     match matches.subcommand() {
         Some(("cache", sub_matches)) => {
             match sub_matches.subcommand() {
-                Some(("clear", _args)) => {
+                Some(("clear", _matches)) => {
                     app.cache_clear()?;
                 },
-                Some(("touch", args)) => {
+                Some(("evict", matches)) => {
+                    let pkg = matches.get_one::<String>("pkg").unwrap();
+                    let version = matches.get_one::<String>("version");
+                    let in_use = matches.get_flag("in-use");
+                    app.cache_evict(pkg, version, in_use)?;
+                },
+                Some(("list", matches)) => {
+                    //let pkg = matches.get_one::<String>("pkg").unwrap();
+                    app.cache_list()?;
+                },
+                Some(("fetch", matches)) => {
+                    let pkg = matches.get_one::<String>("pkg").unwrap();
+                    app.cache_fetch(pkg)?;
+                },
+                Some(("touch", matches)) => {
 
-                    let filename = args.get_one::<String>("pkg").unwrap();
-                    let duration = args.get_one::<String>("duration").map(|s| {
+                    let pkg = matches.get_one::<String>("pkg").unwrap();
+                    let version = matches.get_one::<String>("version");
+                    let duration = matches.get_one::<String>("duration").map(|s| {
                         humantime::parse_duration(s).expect("invalid time string")
                     });
 
-                    app.cache_touch(filename, duration)?;
+                    app.cache_touch(pkg, version, duration)?;
                 },
                 _ => {
                     todo!("NYI");
@@ -170,16 +185,17 @@ fn main() -> AResult<()> {
         }
         Some(("install", sub_matches)) => {
 
-            let no_pin = *sub_matches.get_one::<bool>("no-pin").unwrap();
+            let no_pin = sub_matches.get_flag("no-pin");
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
-            let update = *sub_matches.get_one::<bool>("update").unwrap();
+            let update = sub_matches.get_flag("update");
+            let reinstall = sub_matches.get_flag("reinstall");
 
             app.provider_filter = args::parse_providers(sub_matches);
-            app.install_cmd(pkg_name, no_pin, update)?;
+            app.install_cmd(pkg_name, no_pin, update, reinstall)?;
         }
         Some(("uninstall", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
-            let verbose = *sub_matches.get_one::<bool>("verbose").unwrap();
+            let verbose = sub_matches.get_flag("verbose");
             app.uninstall_cmd(pkg_name, verbose)?;
         }
         Some(("update", sub_matches)) => {
@@ -207,19 +223,20 @@ fn main() -> AResult<()> {
             // --stop-on-first  option to stop on the first mismatch
             // --fail-fast?
 
-            let verbose = *sub_matches.get_one::<bool>("verbose").unwrap();
-            let restore = *sub_matches.get_one::<bool>("restore").unwrap();
-            let mtime   = *sub_matches.get_one::<bool>("mtime").unwrap();
+            let verbose = sub_matches.get_flag("verbose");
+            let restore = sub_matches.get_flag("restore");
+            let restore_volatile = sub_matches.get_flag("restore-volatile");
+            let mtime   = sub_matches.get_flag("mtime");
 
             let pkg_names = sub_matches
                 .get_many::<String>("pkg")
                 .map_or(Vec::new(), |given| given.collect());
 
-            app.verify_cmd(&pkg_names, restore, verbose, mtime)?;
+            app.verify_cmd(&pkg_names, restore, restore_volatile, verbose, mtime)?;
         }
         Some(("search", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
-            let exact = *sub_matches.get_one::<bool>("exact").unwrap();
+            let exact = sub_matches.get_flag("exact");
             //println!("searching for package {}", pkg_name);
             app.search_cmd(pkg_name, exact)?;
         }
@@ -232,8 +249,8 @@ fn main() -> AResult<()> {
                 Some(("list-files", sub_matches)) => {
                     let pkg = sub_matches.get_one::<String>("pkg").unwrap();
                     let depth = sub_matches.get_one::<u32>("depth");
-                    let show_type = *sub_matches.get_one::<bool>("show-type").unwrap();
-                    let absolute  = *sub_matches.get_one::<bool>("absolute").unwrap();
+                    let show_type = sub_matches.get_flag("show-type");
+                    let absolute  = sub_matches.get_flag("absolute");
                     app.query_files(pkg, depth.copied(), absolute, show_type)?;
                 }
                 _ => {

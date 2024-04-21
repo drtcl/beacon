@@ -123,7 +123,8 @@ bpm_config.toml:
 | `BPM` | directory of the bpm executable |
 | `OS`  | `linux,` `unix,` `windows,` `wasm,` `unknown` |
 | `ARCH3264` | `32` or `64` |
-| `ARCHX8664` | `x86` or `x86_64` |
+| `POINTER_WIDTH` | `32` or `64` |
+| `ARCHX8664` | `x86`, `x86_64`, `arm`, or `aarch64` |
 
 ## Mount Points
 All packages are install into a *mount point*.

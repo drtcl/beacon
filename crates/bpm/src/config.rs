@@ -216,9 +216,9 @@ fn path_replace<S: Into<String>>(path: S) -> String {
 
     if path.contains("${ARCH3264}") {
 
-        let arch = if cfg!(target_arch="x86") {
+        let arch = if cfg!(target_pointer_width="32") {
             "32"
-        } else if cfg!(target_arch="x86_64") {
+        } else if cfg!(target_pointer_width="64") {
             "64"
         } else {
             panic!("unhandled architecture");
@@ -227,12 +227,29 @@ fn path_replace<S: Into<String>>(path: S) -> String {
         path = path.replace("${ARCH3264}", arch);
     }
 
+    if path.contains("${POINTER_WIDTH}") {
+
+        let arch = if cfg!(target_pointer_width="32") {
+            "32"
+        } else if cfg!(target_pointer_width="64") {
+            "64"
+        } else {
+            panic!("unhandled architecture");
+        };
+
+        path = path.replace("${POINTER_WIDTH}", arch);
+    }
+
     if path.contains("${ARCHX8664}") {
 
         let arch = if cfg!(target_arch="x86") {
             "x86"
         } else if cfg!(target_arch="x86_64") {
             "x86_64"
+        } else if cfg!(target_arch="arm") {
+            "arm"
+        } else if cfg!(target_arch="aarch64") {
+            "aarch64"
         } else {
             panic!("unhandled architecture");
         };

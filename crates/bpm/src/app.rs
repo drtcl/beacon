@@ -2,6 +2,7 @@ use crate::*;
 use std::io::BufWriter;
 use std::io::IsTerminal;
 use chrono::SubsecRound;
+use itertools::Itertools;
 use package::PackageID;
 use std::fs::File;
 use std::io::Seek;
@@ -274,7 +275,7 @@ impl App {
 
         self.db.add_package(details);
 
-        self.db.cache_touch(package_file_filename);
+        self.db.cache_touch(package_file_filename, None);
         self.db.cache_unuse_all_versions(pkg_name);
         self.db.cache_set_in_use(package_file_filename, true);
 
@@ -362,7 +363,7 @@ impl App {
     ///
     /// `bpm install foo` or `bpm install foo@1.2.3` or `bpm install path/to/foo_1.2.3.bpm`
     /// install a package from a provider or directly from a file
-    pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool) -> AResult<()> {
+    pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool, reinstall: bool) -> AResult<()> {
 
         self.create_load_db()?;
 
@@ -400,8 +401,8 @@ impl App {
 
             let v = split.next();
 
-            let (listing, mut _versioning) = self.find_package_version(pkg_name, v)?;
-            versioning = _versioning;
+            let listing;
+            (listing, versioning) = self.find_package_version(pkg_name, v)?;
             version = Version::new(&listing.version);
         }
 
@@ -417,8 +418,10 @@ impl App {
             let version_same = current.metadata.version == version.as_str();
 
             if version_same {
-                println!("No change. Package {} at version {} is already intalled", pkg_name, version);
-                return Ok(());
+                if !reinstall {
+                    println!("No change. Package {} at version {} is already intalled", pkg_name, version);
+                    return Ok(());
+                }
             } else if !update {
                 println!("Package {} ({}) is already installed. Pass --update to install a different version.", pkg_name, current.metadata.version);
                 return Ok(());
@@ -472,7 +475,7 @@ impl App {
         self.delete_package_files(pkg, verbose)?;
         self.db.remove_package(pkg.metadata.id());
         if let Some(filename) = package_file_filename {
-            self.db.cache_touch(&filename);
+            self.db.cache_touch(&filename, None);
             self.db.cache_set_in_use(&filename, false);
         }
         self.save_db()?;
@@ -582,7 +585,7 @@ impl App {
         self.db.add_package(details);
 
         if let Some(filename) = new_pkg_file.file_name() {
-            self.db.cache_touch(filename);
+            self.db.cache_touch(filename, None);
             self.db.cache_unuse_all_versions(pkg_name);
             self.db.cache_set_in_use(filename, true);
         }
@@ -711,9 +714,11 @@ impl App {
     /// For installed packages listed in the db,
     /// walk each file and hash the version we have on disk
     /// and compare that to the hash stored in the db.
-    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, verbose: bool, allow_mtime: bool) -> AResult<()>
+    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, restore_volatile: bool, verbose: bool, allow_mtime: bool) -> AResult<()>
         where S: AsRef<str>,
     {
+        tracing::trace!(restore=restore, restore_volatile=restore_volatile, "verify");
+
         self.load_db()?;
 
         // all given names must be installed
@@ -747,6 +752,13 @@ impl App {
 
                 let path = join_path_utf8!(&root_dir, filepath);
                 //println!("{}", path);
+
+                if fileinfo.volatile {
+                    if !restore_volatile {
+                        tracing::trace!("skipping volatile file {}::{}", &pkg.metadata.name, filepath);
+                        continue;
+                    }
+                }
 
                 let state = get_filestate(&path);
                 let mut modified = false;
@@ -1124,62 +1136,64 @@ impl App {
         Ok(())
     }
 
+    /// `bpm cache clear`
     pub fn cache_clear(&mut self) -> AResult<()> {
 
-        let retention = chrono::Duration::from_std(self.config.cache_retention)?;
-        //let retention = chrono::Duration::seconds(10);
+        let retention = self.config.cache_retention;
 
         let now = chrono::Utc::now().round_subsecs(0);
-        tracing::trace!("cache retention {} ({})", retention, now - retention);
+        tracing::trace!("cache retention {:?} ({})", retention, now - retention);
 
         self.load_db()?;
 
         // gather a list of package files in the cache
         let pkg_dir = join_path!(&self.config.cache_dir, "packages");
-        let mut pkgs = Vec::new();
 
-        for entry in walkdir::WalkDir::new(&pkg_dir)
+        for path in walkdir::WalkDir::new(&pkg_dir)
             .max_depth(1) // package files are a flat list at the root dir
             .into_iter()
             .skip(1)      // skip the root dir
             .flatten()    // skip error entries
+            .map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
+            .flatten()
         {
-            pkgs.push(entry.file_name().to_string_lossy().to_string());
-        }
+            if let Some(filename) = path.file_name() {
+                let mut remove = false;
 
-        for filename in pkgs {
-            let mut remove = false;
+                let mut touch = None;
+                let mut in_use = false;
 
-            let mut touch = None;
-            let mut in_use = false;
+                match self.db.cache_files.iter().find(|e| e.filename == filename) {
+                    None => {
+                        remove = true;
+                    }
+                    Some(ent) => {
+                        in_use = ent.in_use;
+                        touch = Some(ent.touched);
 
-            match self.db.cache_files.iter().find(|e| e.filename == filename) {
-                None => {
-                    remove = true;
-                }
-                Some(ent) => {
-                    in_use = ent.in_use;
-                    touch = Some(ent.touched);
+                        if !ent.in_use {
 
-                    if !ent.in_use {
-                        let remove_time = ent.touched + retention;
-                        if remove_time < now {
-                            remove = true;
+                            let retention = ent.retention.unwrap_or(retention);
+
+                            let remove_time = ent.touched + retention;
+                            if remove_time < now {
+                                remove = true;
+                            }
                         }
                     }
                 }
-            }
 
-            tracing::trace!(touch=?touch, in_use=in_use, "cache {} {}", tern!(remove, "remove", "keep"), filename);
+                tracing::trace!(touch=?touch, in_use=in_use, "cache {} {}", tern!(remove, "remove", "keep"), filename);
 
-            if remove {
-                let pkg_path = join_path!(&pkg_dir, &filename);
-                let ok = std::fs::remove_file(&pkg_path);
-                if let Err(e) = ok {
-                    eprintln!("failed to remove {}: {}", pkg_path.display(), e);
+                if remove {
+                    let pkg_path = join_path!(&pkg_dir, &filename);
+                    let ok = std::fs::remove_file(&pkg_path);
+                    if let Err(e) = ok {
+                        eprintln!("failed to remove {}: {}", pkg_path.display(), e);
+                    }
+
+                    self.db.cache_files.retain(|e| e.filename != filename);
                 }
-
-                self.db.cache_files.retain(|e| e.filename != filename);
             }
         }
 
@@ -1187,15 +1201,193 @@ impl App {
         Ok(())
     }
 
-    pub fn cache_touch(&mut self, filename: &str, duration: Option<std::time::Duration>) -> AResult<()> {
+    /// `bpm cache evict`
+    pub fn cache_evict(&mut self, pkg: &str, version: Option<&String>, in_use: bool) -> AResult<()> {
 
-        dbg!(&filename);
-        dbg!(&duration);
+        self.load_db()?;
 
-        //if let Ok(true) = std::fs::try_exists(filename) {
-        //}
+        tracing::trace!("cache evict {}", pkg);
 
-        todo!();
+        for entry in walkdir::WalkDir::new(join_path_utf8!(&self.config.cache_dir, "packages"))
+            .max_depth(1)
+            .into_iter()
+            .skip(1) // skip the cache/packages dir
+            .flatten()
+        {
+            let path = Utf8Path::from_path(entry.path());
+
+            if let Some(path) = path {
+                if let Some(fname) = path.file_name() {
+                    if package::is_packagefile_name(fname) {
+                        if let Some((pname, pversion)) = package::split_parts(fname) {
+
+                            //tracing::trace!(name=pname, version=pversion, "cache walk");
+
+                            if pname != pkg {
+                                continue;
+                            }
+
+                            if version.is_some() && version.unwrap() != pversion {
+                                continue;
+                            }
+
+                            let find = self.db.cache_files.iter().find(|ent| ent.filename == fname);
+                            let p_in_use = find.map(|ent| ent.in_use).unwrap_or(false);
+                            if p_in_use && !in_use {
+                                tracing::trace!("cache evict skip, file in use {}", fname);
+                                continue;
+                            }
+
+                            tracing::trace!(file=fname, "cache delete");
+                            let _ = std::fs::remove_file(path);
+                            self.db.cache_evict(fname);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.save_db()?;
+
+        Ok(())
+    }
+
+    /// `bpm cache list`
+    pub fn cache_list(&mut self) -> AResult<()> {
+
+        self.load_db()?;
+
+        tracing::trace!("cache list");
+
+        let mut tw = tabwriter::TabWriter::new(std::io::stdout());
+        let _ = write!(&mut tw, "name\tversion\tfilename\tin use\texpiration\n");
+
+        let retention = self.config.cache_retention;
+        let now = chrono::Utc::now().round_subsecs(0);
+
+        for entry in walkdir::WalkDir::new(join_path_utf8!(&self.config.cache_dir, "packages"))
+            .max_depth(1)
+            .sort_by_file_name()
+            .into_iter()
+            .skip(1) // skip the cache/packages dir
+            .flatten()
+        {
+            let path = Utf8Path::from_path(entry.path());
+
+            if let Some(path) = path {
+                if let Some(fname) = path.file_name() {
+                    if package::is_packagefile_name(fname) {
+                        if let Some((name, version)) = package::split_parts(fname) {
+
+                            let find = self.db.cache_files.iter().find(|ent| ent.filename == fname);
+                            let retention = find.and_then(|ent| ent.retention).unwrap_or(retention);
+
+                            let in_use = if find.map(|ent| ent.in_use).unwrap_or(false) {
+                                "yes"
+                            } else {
+                                "no"
+                            };
+
+                            let mut duration = String::new();
+                            if let Some(touch) = find.map(|ent| ent.touched) {
+                                let expire = touch + retention;
+                                if now < expire {
+                                    let d = (expire- now).to_std().unwrap();
+                                    duration = humantime::format_duration(d).to_string();
+                                } else {
+                                    let d = (now - expire).to_std().unwrap();
+                                    duration = humantime::format_duration(d).to_string();
+                                    duration.push_str(" ago");
+                                }
+                            };
+
+                            let _ = write!(&mut tw, "{}\t{}\t{}\t{}\t{}\n", name, version, fname, in_use, duration);
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = tw.flush();
+
+        Ok(())
+    }
+
+    /// `bpm cache fetch name@version`
+    pub fn cache_fetch(&mut self, mut pkg_name: &str) -> AResult<()> {
+
+        tracing::trace!("cache fetch {}", pkg_name);
+
+        let mut split = pkg_name.split('@');
+
+        pkg_name = match split.next() {
+            Some("") | None => {
+                anyhow::bail!("empty package name");
+            }
+            Some(name) => name
+        };
+
+        let v = split.next();
+
+        let (listing, _versioning) = self.find_package_version(pkg_name, v)?;
+        let version = Version::new(&listing.version);
+
+        let id = PackageID {
+            name: pkg_name.to_string(),
+            version: version.to_string(),
+        };
+
+        let cache_path = self.cache_package_require(&id)?;
+        tracing::trace!("cache fetched {}", cache_path);
+
+        self.load_db()?;
+        if let Some(fname) = cache_path.file_name() {
+            self.db.cache_touch(fname, None);
+        }
+        self.save_db()?;
+
+        Ok(())
+    }
+
+    /// `bpm cache touch`
+    pub fn cache_touch(&mut self, pkg: &str, version: Option<&String>, duration: Option<std::time::Duration>) -> AResult<()> {
+
+        self.load_db()?;
+
+        tracing::trace!(pkg, version, duration=?duration, "cache touch");
+
+        for entry in walkdir::WalkDir::new(join_path_utf8!(&self.config.cache_dir, "packages"))
+            .max_depth(1)
+            .into_iter()
+            .skip(1) // skip the cache/packages dir
+            .flatten()
+        {
+            let path = Utf8Path::from_path(entry.path());
+
+            if let Some(path) = path {
+                if let Some(fname) = path.file_name() {
+                    if package::is_packagefile_name(fname) {
+                        if let Some((pname, pversion)) = package::split_parts(fname) {
+
+                            if pname != pkg {
+                                continue;
+                            }
+
+                            if version.is_some() && version.unwrap() != pversion {
+                                continue;
+                            }
+
+                            tracing::trace!(file=fname, duration=?duration, "cache touch");
+                            self.db.cache_touch(fname, duration);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.save_db()?;
+
+        Ok(())
     }
 
     /// LOOKUP a package in the cache.
