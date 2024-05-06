@@ -829,7 +829,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
             });
         }
 
-        meta.add_file(entry.pkg_path, package::FileInfo {
+        meta.add_file(sanitize_pathbuf(entry.pkg_path), package::FileInfo {
             hash: entry.hash,
             filetype: entry.file_type.into(),
             mtime: None,
@@ -922,6 +922,21 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     println!("Package created at {}", std::fs::canonicalize(package_file_path.as_path())?.display());
 
     Ok(())
+}
+
+fn sanitize_path(path: &Utf8Path) -> Utf8PathBuf {
+    if cfg!(windows) {
+        Utf8PathBuf::from(&path.as_str().replace("\\", "/"))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn sanitize_pathbuf(mut path: Utf8PathBuf) -> Utf8PathBuf {
+    if cfg!(windows) {
+        path = sanitize_path(path.as_path());
+    }
+    path
 }
 
 fn canonicalize_no_symlink(path: &Utf8Path) -> Result<Utf8PathBuf> {
@@ -1189,4 +1204,56 @@ pub fn main_cli(matches: &clap::ArgMatches) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::*;
+
+    /// paths should always be represented with forward slashes
+    #[test]
+    fn path_slashes() -> Result<()> {
+
+        {
+            let mut path = Utf8PathBuf::from("foo/bar");
+            path.push("baz");
+            path.push("qux");
+
+            let parent = path.parent().unwrap();
+            assert_eq!(parent, Utf8Path::new("foo/bar/baz"));
+
+            let parent = sanitize_path(&parent);
+            let path = sanitize_path(&path);
+
+            let obj = serde_json::json!{{
+                "parent": parent,
+                "path": path,
+            }};
+            let json = serde_json::to_string(&obj)?;
+            assert_eq!(json, "{\"parent\":\"foo/bar/baz\",\"path\":\"foo/bar/baz/qux\"}");
+
+        }
+
+        {
+            let mut path = Utf8PathBuf::from("foo");
+            path.push("bar");
+
+            let parent = sanitize_path(path.parent().unwrap());
+            assert_eq!(parent, Utf8Path::new("foo"));
+
+            let path = sanitize_path(&path);
+
+            let json = serde_json::to_string(&path)?;
+            assert_eq!(json, "\"foo/bar\"");
+
+            let obj = serde_json::json!{{
+                "path": path,
+            }};
+            let json = serde_json::to_string(&obj)?;
+            assert_eq!(json, "{\"path\":\"foo/bar\"}");
+        }
+
+        Ok(())
+    }
 }
