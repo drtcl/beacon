@@ -1,6 +1,7 @@
 #![feature(let_chains)]
 #![feature(iter_collect_into)]
 #![feature(fs_try_exists)]
+#![feature(io_error_more)]
 
 #![allow(dead_code)]
 #![allow(unused_imports)]
@@ -113,6 +114,12 @@ fn main() -> AResult<()> {
         return bpmpack::main_cli(matches);
     }
 
+    // shortcut to swiss cmds, no config file needed
+    #[cfg(feature = "swiss")]
+    if let Some(("util", matches)) = matches.subcommand() {
+        return swiss::main_cli(matches);
+    }
+
     // find the config file
     let config_file = matches.get_one::<String>("config");
     let config_file = config_file.map_or_else(find_config_file, |s| Ok(PathBuf::from(s)))?;
@@ -196,7 +203,8 @@ fn main() -> AResult<()> {
         Some(("uninstall", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
             let verbose = sub_matches.get_flag("verbose");
-            app.uninstall_cmd(pkg_name, verbose)?;
+            let remove_unowned = sub_matches.get_flag("remove-unowned");
+            app.uninstall_cmd(pkg_name, verbose, remove_unowned)?;
         }
         Some(("update", sub_matches)) => {
 

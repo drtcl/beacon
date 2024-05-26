@@ -455,7 +455,7 @@ impl App {
 
     /// `bpm uninstall` or `bpm remove`
     /// uninstall a package
-    pub fn uninstall_cmd(&mut self, pkg_name: &String, verbose: bool) -> AResult<()> {
+    pub fn uninstall_cmd(&mut self, pkg_name: &String, verbose: bool, remove_unowned: bool) -> AResult<()> {
         // from the package name,
         // find all files that belong to this package from the db
 
@@ -466,13 +466,12 @@ impl App {
         if found.is_none() {
             println!("package '{pkg_name}' not installed");
             std::process::exit(0);
-            //anyhow::bail!("package '{pkg_name}' not installed"),
         }
 
         let pkg = found.unwrap();
         let package_file_filename = pkg.package_file_filename.clone();
 
-        self.delete_package_files(pkg, verbose)?;
+        self.delete_package_files(pkg, verbose, remove_unowned)?;
         self.db.remove_package(pkg.metadata.id());
         if let Some(filename) = package_file_filename {
             self.db.cache_touch(&filename, None);
@@ -525,7 +524,7 @@ impl App {
             (path, info)
         });
 
-        let delete_ok = Self::delete_files(iter, false);
+        let delete_ok = Self::delete_files(iter, false, false);
         if let Err(e) = delete_ok {
             eprintln!("error deleting files {:?}", e);
         }
@@ -539,10 +538,11 @@ impl App {
             // if already exists, check hash
             let fullpath = join_path_utf8!(&location, &path);
             if let Ok(true) = fullpath.try_exists() {
-                if !info.filetype.is_dir() {
+
+                if info.filetype.is_file() {
                     tracing::trace!("getting hash for {}", fullpath);
-                    let mut file = File::open(&fullpath)?;
-                    let hash = blake3_hash_reader(&mut file)?;
+                    let mut file = File::open(&fullpath).context("opening file for reading")?;
+                    let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
 
                     if Some(&hash) == info.hash.as_ref() {
                         // this file can be skipped during update
@@ -897,7 +897,7 @@ impl App {
         Ok(())
     }
 
-    fn delete_files<'a, I, P>(files: I, verbose: bool) -> AResult<()>
+    fn delete_files<'a, I, P>(files: I, verbose: bool, remove_unowned: bool) -> AResult<()>
         where
             P : std::fmt::Debug + AsRef<Utf8Path>,
             I : Iterator<Item=(P, &'a package::FileInfo)>,
@@ -912,14 +912,14 @@ impl App {
 
             match &fileinfo.filetype {
                 package::FileType::Link(to) => {
-                    vout!(verbose, "removing {filepath:?} -> {to}");
+                    vout!(verbose, "delete {filepath} -> {to}");
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
                         eprintln!("error deleting {filepath}: {e}");
                     }
                 }
                 package::FileType::File => {
-                    vout!(verbose, "removing {filepath:?}");
+                    vout!(verbose, "delete {filepath}");
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
                         eprintln!("error deleting {filepath}: {e}");
@@ -933,10 +933,21 @@ impl App {
 
         dirs.reverse();
         for path in dirs {
-            vout!(verbose, "removing dir {path:?}");
+            vout!(verbose, "delete {path}");
 
             let exists = matches!(path.try_exists(), Ok(true));
-            let e = std::fs::remove_dir(&path);
+            let e = if remove_unowned {
+                std::fs::remove_dir_all(&path)
+            } else {
+                let ret = std::fs::remove_dir(&path);
+                match ret {
+                    Err(ref e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                        Ok(())
+                    },
+                    _ => ret,
+                }
+            };
+
             if let Err(e) = e && exists {
                 eprintln!("error deleting {path}: {e}");
             }
@@ -945,7 +956,7 @@ impl App {
         Ok(())
     }
 
-    fn delete_package_files(&self, pkg: &db::DbPkg, verbose: bool) -> AResult<()> {
+    fn delete_package_files(&self, pkg: &db::DbPkg, verbose: bool, remove_unowned: bool) -> AResult<()> {
 
         let location = pkg.location.as_ref().context("package has no install location")?;
 
@@ -954,7 +965,7 @@ impl App {
             (path, info)
         });
 
-        Self::delete_files(iter, verbose)
+        Self::delete_files(iter, verbose, remove_unowned)
     }
 
     /// `bpm query owner <file>`

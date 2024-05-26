@@ -26,7 +26,7 @@ pub fn get_cli() -> Command {
 
     let cli = Command::new("bpm")
         .version(clap::crate_version!())
-        .about("bpm : A simple, generic, general-purpose package manager")
+        .about("The Beacon Package Manager : bpm : A simple, generic, general-purpose package manager")
         .author("Bryan Splitgerber")
         .arg(arg!(-c --config <file> "use a specific config file"))
         .subcommand_required(true)
@@ -82,11 +82,11 @@ pub fn get_cli() -> Command {
         )
         .subcommand(
             Command::new("uninstall")
-                //.alias("remove")
                 .visible_alias("remove")
-                .about("remove installed packages")
+                .about("Remove installed packages")
                 .arg(arg!(<pkg> "package name or path to local package file"))
                 .arg(arg!(-v --verbose))
+                .arg(arg!(--"remove-unowned" "Remove any unowned files"))
         )
         .subcommand(
             Command::new("update")
@@ -159,7 +159,7 @@ pub fn get_cli() -> Command {
         //        .arg(arg!(--channels "list channels the given package"))
         //)
         .subcommand(
-            Command::new("cache").about("cache management")
+            Command::new("cache").about("Cache management")
                 .subcommand(
                     Command::new("list")
                         .about("List cached package files and when they expire")
@@ -167,7 +167,7 @@ pub fn get_cli() -> Command {
                 .subcommand(
                     Command::new("fetch")
                         .about("Fetch a package and store it in the cache")
-                        .arg(arg!(<pkg>... "Package name(s) to fetch"))
+                        .arg(arg!(<pkg> "Package name to fetch"))
                 )
                 .subcommand(
                     Command::new("touch")
@@ -193,6 +193,13 @@ pub fn get_cli() -> Command {
     let cli = cli.subcommand(
         bpmpack::args::build_cli(Command::new("pack")
             .about("Bundled bpm-pack utils. Create packages.")
+        )
+    );
+
+    #[cfg(feature = "swiss")]
+    let cli = cli.subcommand(
+        swiss::build_cli(Command::new("util")
+            .about("Additional tools/utils")
         )
     );
 

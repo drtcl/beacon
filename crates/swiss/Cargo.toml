@@ -1,0 +1,30 @@
+[package]
+name = "swiss"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "swiss"
+
+[[bin]]
+name = "swiss"
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+camino.workspace = true
+clap.workspace = true
+tar.workspace = true
+version.path = "../version"
+package.path = "../package"
+wild.workspace = true
+zstd = {workspace = true, features = ["zstdmt"] }
+
+[lints]
+workspace = true
+
+[features]
+default = ["tar", "zstd", "blake3"]
+tar = []
+zstd = []
+blake3 = []

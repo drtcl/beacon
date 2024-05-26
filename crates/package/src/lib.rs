@@ -29,12 +29,6 @@ pub type FilePath = Utf8PathBuf;
 /// Map with ordering
 type OrderedMap<K, V> = BTreeMap<K, V>;
 
-#[cfg(feature = "yaml")]
-pub const META_FILE_NAME: &str = "meta.yaml";
-
-#[cfg(feature = "toml")]
-pub const META_FILE_NAME: &str = "meta.toml";
-
 pub const META_FILE_NAME: &str = "meta.json";
 
 pub const DATA_FILE_NAME: &str = "data.tar.zst";
@@ -259,35 +253,6 @@ impl MetaData {
         }
     }
 
-    #[cfg(feature = "toml")]
-    pub fn to_writer<W: Write>(&self, w: &mut W) -> Result<()> {
-        //let s = toml::to_string(&self)?;
-        let s = toml::to_string_pretty(&self)?;
-        w.write_all(s.as_bytes())?;
-        Ok(())
-    }
-
-    #[cfg(feature = "toml")]
-    pub fn from_reader<R: Read>(r: &mut R) -> Result<Self> {
-        let mut contents = String::new();
-        r.read_to_string(&mut contents)?;
-        let meta = toml::from_str::<Self>(&contents)?;
-        //dbg!(&meta);
-        Ok(meta)
-    }
-
-    #[cfg(feature = "yaml")]
-    pub fn to_writer<W: Write>(&self, w: &mut W) -> Result<()> {
-        serde_yaml::to_writer(w, self)?;
-        Ok(())
-    }
-
-    #[cfg(feature = "yaml")]
-    pub fn from_reader<R: Read>(r: &mut R) -> Result<Self> {
-        let ret: Self = serde_yaml::from_reader(r)?;
-        Ok(ret)
-    }
-
     pub fn to_writer<W: Write>(&self, w: &mut W) -> Result<()> {
         //serde_json::to_writer(w, self)?;
         serde_json::to_writer_pretty(w, self)?;
@@ -478,9 +443,11 @@ pub fn is_version_string(text: &str) -> bool {
     // cannot be empty string
     // cannot contain the file extension
     // must start with a number
+    // must end with an alphanumeric
     !text.is_empty()
         && !text.contains(PKG_FILE_EXTENSION)
         && text.chars().next().unwrap().is_ascii_digit()
+        && text.chars().last().unwrap().is_alphanumeric()
 }
 
 pub fn filename_match(filename: &str, id: &PackageID) -> bool {

@@ -1223,7 +1223,7 @@ mod test {
             let parent = path.parent().unwrap();
             assert_eq!(parent, Utf8Path::new("foo/bar/baz"));
 
-            let parent = sanitize_path(&parent);
+            let parent = sanitize_path(parent);
             let path = sanitize_path(&path);
 
             let obj = serde_json::json!{{
