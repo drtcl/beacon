@@ -36,7 +36,7 @@ fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
     // if it does exist and it isn't a dir, that's a problem
     match (path.exists(), path.is_dir()) {
         (false, _) => {
-            println!("creating dir {path:?}");
+            tracing::debug!("creating dir {path:?}");
             std::fs::create_dir_all(path).context("failed to create directory")?;
             Ok(())
         }
@@ -151,6 +151,7 @@ fn main() -> AResult<()> {
                 },
                 Some(("fetch", matches)) => {
                     let pkg = matches.get_one::<String>("pkg").unwrap();
+                    app.provider_filter = args::parse_providers(matches);
                     app.cache_fetch(pkg)?;
                 },
                 Some(("touch", matches)) => {

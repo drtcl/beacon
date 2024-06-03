@@ -4,12 +4,22 @@ A general purpose, flexible, configurable, package manager for no specific langu
 
 # Usage
 
-## Searching for packages
+## Scan for packages
+
+Query your providers for what packages and versions are available.
+
+    bpm scan
+
+## Search for packages
 
     bpm search foo
     bpm search foo --exact
 
-## Installing a package
+or list all available packages
+
+    bpm list available
+
+## Install a package
 
 install the latest `foo` package from a **provider**:
 
@@ -23,7 +33,7 @@ install from a local package file:
 
     bpm install path/to/foo_1.2.3.bpm
 
-## Uninstalling a package
+## Uninstall a package
 
     bpm uninstall foo
 
@@ -39,7 +49,7 @@ Update a specific package:
 
 Update a specific package to a specific version:
 
-    bpm install foo@1.2.3 --update
+    bpm install --update foo@1.2.3
 
 # Providers
 
@@ -162,24 +172,22 @@ If channels are defined for a package, the channel name can be used when install
 
 The `channels.json` file can be used to define the channels and looks something like this:
 
-```
-{
-    "current": [
-        "1.0.0",
-        "0.9.0"
-    ],
-    "beta": [
-        "2.0.0",
-    ],
-}
-```
+    {
+        "current": [
+            "1.0.0",
+            "0.9.0"
+        ],
+        "beta": [
+            "2.0.0",
+        ],
+    }
 
 Packages can also just be put into channel directories. The directory name starts with `channel_`, for example: `channel_stable` in:
 
->    pkg/
->        foo/
->            channel_stable/
->                foo-1.1.1.bpm
+    pkg/
+        foo/
+            channel_stable/
+                foo-1.1.1.bpm
 
 Multiple versions *can* be specified for a channel, but only the *greatest* version is ever used by bpm. Older versions can be left in the file for your own history or for information for other tools using bpm.
 

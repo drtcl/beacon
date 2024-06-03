@@ -286,6 +286,27 @@ impl App {
 
     fn find_package_version(&self, pkg_name: &str, which: Option<&str>) -> AResult<(search::SingleListing, Versioning)> {
 
+        // first search our locally cached files
+        if let Some(version) = which {
+            let x = self.cache_package_lookup(&PackageID {
+                name: pkg_name.to_string(),
+                version: version.to_string()
+            });
+            if let Some(path) = x {
+                let filename = path.file_name().context("cache file has no filename")?.to_string();
+                return Ok((
+                    search::SingleListing {
+                        pkg_name: std::rc::Rc::<str>::from(pkg_name),
+                        version: version.to_string(),
+                        filename,
+                        url: "".into(),
+                        channels: vec![],
+                    },
+                    Versioning::pinned_version()
+                ));
+            }
+        }
+
         tracing::trace!(pkg_name, which, "find_package_version");
 
         // get search results for just this package name
@@ -332,14 +353,9 @@ impl App {
             versions.insert(version, urlfn);
         }
 
-        //dbg!(versions);
-
         // take the greatest package version
         let result = search::flatten(results);
         let result = result.into_iter().next().unwrap();
-
-        //dbg!(&result);
-        //dbg!(&versioning);
 
         Ok((result, versioning))
     }
@@ -368,7 +384,7 @@ impl App {
         self.create_load_db()?;
 
         // make sure we have a cache dir to save the package in
-        create_dir(&self.config.cache_dir)?;
+        create_dir(join_path_utf8!(&self.config.cache_dir, "packages"))?;
 
         // are we installing directly from a package file?
         // or from just a name that must be found and pulled from a provider?
@@ -557,6 +573,12 @@ impl App {
 
         //dbg!(&skip_files);
 
+        let pbar = indicatif::ProgressBar::new(new_files.len() as u64);
+        pbar.set_style(indicatif::ProgressStyle::with_template(
+            "   {msg}\n {spinner:.green} {wide_bar:.green} {pos}/{len} "
+        ).unwrap());
+        pbar.set_prefix(metadata.name.to_string());
+
         new_package_fd.rewind()?;
         let mut outer_tar = tar::Archive::new(&mut new_package_fd);
         let (mut inner_tar, _size) = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
@@ -567,6 +589,7 @@ impl App {
             let mut entry = entry?;
             let path = entry.path()?;
             let path = Utf8PathBuf::from(&path.to_string_lossy());
+            pbar.set_message(String::from(path.as_str()));
             if skip_files.remove(&path) {
                 tracing::trace!("skipping   {}", path);
             } else {
@@ -574,7 +597,10 @@ impl App {
                 let _ok = entry.unpack_in(&location);
                 //TODO handle error
             }
+            pbar.inc(1);
         }
+
+        pbar.finish_and_clear();
 
         let mut details = db::DbPkg::new(metadata);
         details.location = Some(location);
@@ -661,12 +687,8 @@ impl App {
 
         //TODO can put confirmation prompt here
 
-        //dbg!(&updates);
         for (pkg_name, _oldv, _newv, versioning, new_pkg_file) in updates {
-            //dbg!(&pkg_name);
-            //dbg!(&new_pkg_file);
-            let _ok = self.update_inplace(&pkg_name, new_pkg_file, versioning)?;
-            //dbg!(_ok);
+            self.update_inplace(&pkg_name, new_pkg_file, versioning)?;
         }
 
         Ok(())
@@ -719,6 +741,11 @@ impl App {
     {
         tracing::trace!(restore=restore, restore_volatile=restore_volatile, "verify");
 
+        // if the db file doesn't exist, dont' attempt to load it, return 0 packages
+        if !self.db_file_exists() {
+            return Ok(());
+        }
+
         self.load_db()?;
 
         // all given names must be installed
@@ -753,11 +780,9 @@ impl App {
                 let path = join_path_utf8!(&root_dir, filepath);
                 //println!("{}", path);
 
-                if fileinfo.volatile {
-                    if !restore_volatile {
-                        tracing::trace!("skipping volatile file {}::{}", &pkg.metadata.name, filepath);
-                        continue;
-                    }
+                if fileinfo.volatile && !restore_volatile {
+                    tracing::trace!("skipping volatile file {}::{}", &pkg.metadata.name, filepath);
+                    continue;
                 }
 
                 let state = get_filestate(&path);
@@ -1271,7 +1296,7 @@ impl App {
         tracing::trace!("cache list");
 
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
-        let _ = write!(&mut tw, "name\tversion\tfilename\tin use\texpiration\n");
+        let _ = writeln!(&mut tw, "name\tversion\tfilename\tsize\tin use\texpiration");
 
         let retention = self.config.cache_retention;
         let now = chrono::Utc::now().round_subsecs(0);
@@ -1312,7 +1337,8 @@ impl App {
                                 }
                             };
 
-                            let _ = write!(&mut tw, "{}\t{}\t{}\t{}\t{}\n", name, version, fname, in_use, duration);
+                            let size = get_filesize(path.as_str()).map_or(String::from("?"), |s| format!("{}", indicatif::HumanBytes(s)));
+                            let _ = writeln!(&mut tw, "{}\t{}\t{}\t{}\t{}\t{}", name, version, fname, size, in_use, duration);
                         }
                     }
                 }
@@ -1494,7 +1520,7 @@ impl App {
         let temp_path = join_path_utf8!(&self.config.cache_dir, temp_name);
         let mut file = File::create(&temp_path)?;
 
-        for provider in &self.config.providers {
+        for provider in self.filtered_providers() {
 
             if let Ok(provider::ProviderFile{packages, ..}) = provider.load_file() {
                 if let Some(versions) = packages.get(&id.name) {

@@ -94,6 +94,15 @@ pub struct DependencyID {
     pub version: Option<Version>,
 }
 
+
+/// Information about a package.
+/// - package name and version
+/// - what mount it will be installed to
+/// - a list of dependencies
+/// - a list of included files
+/// - the hash and size of the data file
+/// - an arbitrary key-value store
+/// - a build-time UUID
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MetaData {
     //#[serde(flatten)]
@@ -102,10 +111,26 @@ pub struct MetaData {
     pub version: Version,
     pub mount: Option<String>,
     pub data_hash: Option<String>,
+
+    /// size of uncompressed tar of all data files
+    /// (approximate size of install on disk, tar overhead vs disk overhead)
     pub data_size: u64,
 
+    #[serde(default)]
+    #[serde(skip_serializing_if = "OrderedMap::is_empty")]
     pub dependencies: OrderedMap<PkgName, Option<Version>>,
+
     pub files: OrderedMap<FilePath, FileInfo>,
+
+    //note: `#[serde(default)]` mean use default value if it isn't present at deserialize
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "OrderedMap::is_empty")]
+    pub kv: OrderedMap<String, String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 
     // package build-time UUID
     pub uuid: String,
@@ -243,7 +268,24 @@ impl MetaData {
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
             uuid: uuid::Uuid::nil().to_string(),
+            kv: OrderedMap::new(),
+            description: None,
         }
+    }
+
+    pub fn with_description(mut self, desc: Option<String>) -> Self {
+        self.description = desc;
+        self
+    }
+
+    pub fn with_kv(mut self, kv: OrderedMap<String, String>) -> Self {
+        self.kv = kv;
+        self
+    }
+
+    pub fn with_uuid(mut self, uuid: String) -> Self {
+        self.uuid = uuid;
+        self
     }
 
     pub fn id(&self) -> PackageID {

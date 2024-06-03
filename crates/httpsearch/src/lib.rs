@@ -53,9 +53,13 @@ impl Report {
         }
     }
     fn add_version(&mut self, pkg_name: &str, version: &str, info: VersionInfo) {
-        self.packages.entry(pkg_name.to_string())
-            .or_default()
-            .insert(version.to_string(), info);
+
+        let map = self.packages.entry(pkg_name.to_string())
+            .or_default();
+
+        if !map.contains_key(version) {
+            map.insert(version.to_string(), info);
+        }
     }
     fn add_channel_version(&mut self, pkg_name: &str, channel: &str, version: &str) {
         if let Some(vmap) = self.packages.get_mut(pkg_name) {
@@ -309,13 +313,10 @@ fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, dir_li
     // (3) extract link to channels.json
     let (channels_json, links) = split_links(links, is_channels_json);
 
-    // TODO
-    // (removed) (4) extract links to version dirs
-
     // for each channel dir, scan for package files
     for channel in channel_dirs {
         if let Some(channel_name) = channel_dir_to_name(&channel.text) {
-            tracing::trace!(channel=channel_name, url=channel.url, "scraping channel dir");
+            tracing::trace!(channel=channel_name, url=channel.url, "scanning channel dir");
             if let Ok(url) = Url::parse(&channel.url) {
                 let links = scrape_links_from(client, &url).unwrap_or_default();
 

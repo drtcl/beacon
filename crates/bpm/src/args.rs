@@ -168,6 +168,7 @@ pub fn get_cli() -> Command {
                     Command::new("fetch")
                         .about("Fetch a package and store it in the cache")
                         .arg(arg!(<pkg> "Package name to fetch"))
+                        .arg(providers_arg())
                 )
                 .subcommand(
                     Command::new("touch")

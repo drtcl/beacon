@@ -1,4 +1,5 @@
 #![feature(let_chains)]
+#![feature(iter_array_chunks)]
 
 // take a list of files
 // save them into a data tarball
@@ -262,16 +263,10 @@ struct ModeMatcher {
 
 impl ModeMatcher {
     fn is_volatile(&self, path: &Utf8Path, is_dir: bool) -> bool {
-        match self.volatile.matched(path, is_dir) {
-            ignore::Match::None => false ,
-            _ => true,
-        }
+        !matches!(self.volatile.matched(path, is_dir), ignore::Match::None)
     }
     fn is_weak(&self, path: &Utf8Path, is_dir: bool) -> bool {
-        match self.weak.matched(path, is_dir) {
-            ignore::Match::None => false ,
-            _ => true,
-        }
+        !matches!(self.weak.matched(path, is_dir), ignore::Match::None)
     }
 }
 
@@ -320,7 +315,6 @@ fn file_discovery(paths: Vec<String>) -> Result<FileListing> {
 
     for entry in walker.build() {
         let entry = entry.unwrap();
-        //dbg!(&entry);
         let full_path = PathBuf::from(entry.path());
         let full_path = Utf8PathBuf::from_path_buf(full_path);
         if full_path.is_err() {
@@ -603,6 +597,14 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     let thread_count = get_threads(*matches.get_one::<u8>("threads").expect("expected thread count") as u32);
 
+    let description = matches.get_one::<String>("description").cloned();
+
+    let kv = matches.get_many::<String>("kv").map(|kv| {
+        kv.array_chunks::<2>()
+          .map(|kv| (kv[0].to_owned(), kv[1].to_owned()))
+          .collect::<std::collections::BTreeMap<String, String>>()
+    }).unwrap_or_default();
+
     let deps: Vec<(String, Option<String>)> = matches.get_many::<String>("depend")
         .map(|refs| refs.into_iter().map(|s| s.to_string()).collect::<Vec<_>>())
         .unwrap_or_default()
@@ -737,11 +739,13 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     // start creating the MetaData for this package
     let mut meta = package::MetaData::new(package::PackageID {
-        name: package_name.clone(),
-        version: package_version.to_string(),
-    });
+            name: package_name.clone(),
+            version: package_version.to_string(),
+        })
+        .with_description(description)
+        .with_kv(kv)
+        .with_uuid(uuid::Uuid::new_v4().to_string());
 
-    meta.uuid = uuid::Uuid::new_v4().to_string();
 
     // insert dependencies
     for pair in &deps {
@@ -864,6 +868,11 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     metafile.flush()?;
     let meta_data_size = metafile.stream_position().context("failed to get metadata file size")?;
 
+    //debug: see output metafile
+    //let mut b = Vec::<u8>::new();
+    //meta.to_writer(&mut b);
+    //println!("{}", String::from_utf8_lossy(&b));
+
     let finish_bar = ProgressBar::new(compressed_size + meta_data_size);
     let finish_bar = bars.add(finish_bar);
     finish_bar.enable_steady_tick(Duration::from_millis(200));
@@ -910,6 +919,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         let _ = metafile.keep();
         let _ = data_tar_file.keep();
     }
+
+    //println!("{:#?}", {let mut x = meta.clone(); x.files.clear(); x});
 
     println!("data file count:        {}", file_included_count);
     println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);

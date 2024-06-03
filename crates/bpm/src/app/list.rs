@@ -35,6 +35,7 @@ impl App {
         Ok(())
     }
 
+    /// `bpm list`
     /// list installed packages
     pub fn list_installed(&mut self) -> Result<()> {
 
@@ -50,12 +51,13 @@ impl App {
         for ent in self.db.installed.iter() {
             let channel = ent.versioning.channel.as_deref().unwrap_or("");
             let pinned = tern!(ent.versioning.pinned_to_version, "=", "^");
-            writeln!(&mut tw, "{}\t{pinned}{}\t{}", ent.metadata.name, ent.metadata.version, channel)?;
+            writeln!(&mut tw, "{}\t{}{}\t{}", ent.metadata.name, pinned, ent.metadata.version, channel)?;
         }
         tw.flush()?;
         Ok(())
     }
 
+    /// `bpm list channels`
     /// list channels for a given package, or all packages
     pub fn list_channels_cmd(&mut self) -> Result<()> {
 
@@ -88,6 +90,7 @@ impl App {
         Ok(())
     }
 
+    /// `bpm list available` or `bpm list avail`
     /// list all versions of all packages that are available
     pub fn list_available_cmd(&mut self,
         needle: Option<&String>,

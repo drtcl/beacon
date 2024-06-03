@@ -101,6 +101,13 @@ pub fn build_cli(cmd: clap::Command) -> clap::Command {
              // negative values are not actually accepted, but this gives a better error message
              .allow_negative_numbers(true)
         )
+        .arg(arg!(--description <description> "Provide a brief description of the package"))
+        .arg(arg!(--kv <keyvalue> "Key-Value")
+             .value_name("key=value")
+             .action(clap::ArgAction::Append)
+             .value_delimiter('=')
+             //.num_args(2)
+        )
         .arg(
             Arg::new("depend")
                 .long("depend")
