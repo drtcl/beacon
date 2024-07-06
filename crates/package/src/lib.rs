@@ -457,23 +457,29 @@ pub fn split_parts(filename: &str) -> Option<(&str, &str)> {
 pub fn is_packagefile_name(text: &str) -> bool {
     if text.ends_with(DOTTED_PKG_FILE_EXTENSION) {
         if let Some((name, version)) = split_parts(text) {
-            return is_package_name(name) && is_version_string(version)
+            return is_valid_package_name(name) && is_valid_version(version)
         }
     }
     false
 }
 
 /// Names like "foo" and "bar" are package names
-pub fn is_package_name(text: &str) -> bool {
+pub fn is_valid_package_name(text: &str) -> bool {
     // cannot be empty string
+    // cannot contain underscore _
     // only alphanumeric or '-'
     // starts with [a-zA-Z]
-    // that is: matches [a-zA-Z][a-zA-Z0-9\-]*
-    !text.is_empty() && !text.contains('_')
+    // matches [a-zA-Z][a-zA-Z0-9\-]*
+    // does not end with -
+    // does not have multiple consecutive -
+    !text.is_empty()
+        && !text.contains('_')
         && text.chars().next().unwrap().is_alphabetic()
         && text.chars().all(|c| {
-            c.is_alphanumeric() || c == '-'
+            c.is_ascii() && c.is_alphanumeric() || c == '-'
         })
+        && !text.ends_with('-')
+        && !text.contains("--")
 }
 
 pub fn make_packagefile_name(pkg_name: &str, version: &str) -> String {
@@ -481,15 +487,25 @@ pub fn make_packagefile_name(pkg_name: &str, version: &str) -> String {
 }
 
 /// strings like "1.2.3" and "0.0.1-alpha+linux" are version strings
-pub fn is_version_string(text: &str) -> bool {
+pub fn is_valid_version(text: &str) -> bool {
     // cannot be empty string
+    // cannot contain underscore _
     // cannot contain the file extension
     // must start with a number
     // must end with an alphanumeric
+    // does not have multiple consecutive -, +, or .
     !text.is_empty()
+        && !text.contains('_')
         && !text.contains(PKG_FILE_EXTENSION)
         && text.chars().next().unwrap().is_ascii_digit()
         && text.chars().last().unwrap().is_alphanumeric()
+        && text.chars().all(|c| {
+            c.is_ascii() && c.is_alphanumeric() || c == '-' || c == '+' || c == '.'
+        })
+        && text.as_bytes().windows(2).all(|ab| {
+            let s = ['.', '-', '+'];
+            !(s.contains(&(ab[0] as char)) && s.contains(&(ab[1] as char)))
+        })
 }
 
 pub fn filename_match(filename: &str, id: &PackageID) -> bool {
@@ -534,6 +550,8 @@ mod test {
             data_size: 0,
             dependencies: OrderedMap::new(),
             files: OrderedMap::new(),
+            description: None,
+            kv: BTreeMap::new(),
             uuid: "".into(),
         };
 
@@ -584,6 +602,51 @@ mod test {
         );
 
         meta
+    }
+
+    #[test]
+    fn valid_names() {
+
+        assert!(is_valid_package_name("foobar"));
+        assert!(is_valid_package_name("foo-bar"));
+        assert!(is_valid_package_name("FooBar"));
+
+        assert!(!is_valid_package_name("foo_bar"));
+        assert!(!is_valid_package_name("foo-"));
+        assert!(!is_valid_package_name("foo--bar"));
+    }
+
+    #[test]
+    fn valid_versions() {
+
+        assert!(is_valid_version("0.0.0"));
+        assert!(is_valid_version("0.0.1"));
+        assert!(is_valid_version("1.2.3"));
+
+        assert!(is_valid_version("0.0.0.0"));
+        assert!(is_valid_version("0.0.0.1"));
+        assert!(is_valid_version("1"));
+        assert!(is_valid_version("1.2"));
+        assert!(is_valid_version("1.2.3.4"));
+
+        assert!(is_valid_version("1.2.3-rc1"));
+        assert!(is_valid_version("1.2.3.4-rc1"));
+
+        assert!(is_valid_version("1.2.3-1-rc1"));
+        assert!(is_valid_version("1.2.3.4-1-rc1"));
+
+        assert!(is_valid_version("1.2.3.4-7-ga1b2c3+foo-bar"));
+        assert!(is_valid_version("1+2"));
+
+        assert!(!is_valid_version("foo"));
+        assert!(!is_valid_version("1.2.3.bpm"));
+        assert!(!is_valid_version("1.2.3--1"));
+        assert!(!is_valid_version("1.2.3++1"));
+        assert!(!is_valid_version("1.2.3-+1"));
+        assert!(!is_valid_version("1.2.3+-1"));
+        assert!(!is_valid_version("1..2"));
+        assert!(!is_valid_version("1.-2"));
+        assert!(!is_valid_version("1.+2"));
     }
 
     #[test]

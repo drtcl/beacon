@@ -20,8 +20,11 @@ impl App {
                 self.list_available_cmd(name, exact, oneline, json, channels, limit)?;
             }
             Some(("channels", sub_matches)) => {
+                let name = sub_matches.get_one::<String>("pkg");
+                let exact = sub_matches.get_flag("exact");
+                let json = sub_matches.get_flag("json");
                 self.provider_filter = args::parse_providers(sub_matches);
-                self.list_channels_cmd()?;
+                self.list_channels_cmd(name, exact, json)?;
             }
             Some(("installed", _sub_matches)) => {
                 self.list_installed()?;
@@ -59,7 +62,7 @@ impl App {
 
     /// `bpm list channels`
     /// list channels for a given package, or all packages
-    pub fn list_channels_cmd(&mut self) -> Result<()> {
+    pub fn list_channels_cmd(&mut self, needle: Option<&String>, exact: bool, json: bool) -> Result<()> {
 
         let mut combined = search::PackageList::new();
         for provider in self.filtered_providers() {
@@ -69,6 +72,18 @@ impl App {
         }
 
         combined.retain(|_, versions| versions.iter().any(|(_, vi)| !vi.channels.is_empty()));
+
+        // limit to package names containing the search term (or exact matches)
+        if let Some(needle) = needle {
+            combined.retain(|pkg_name, _versions| {
+                if exact {
+                    pkg_name == needle
+                } else {
+                    pkg_name.contains(needle)
+                }
+            });
+        }
+
         let mut m = BTreeMap::new();
         for (pkg_name, versions) in combined {
             let entry = m.entry(pkg_name).or_insert(BTreeSet::new());
@@ -81,11 +96,19 @@ impl App {
 
         let mut stdout = std::io::stdout();
         for (name, channels) in m {
-            write!(&mut stdout, "{}", name)?;
-            for channel in channels {
-                write!(&mut stdout, " {}", channel)?;
+
+            if json {
+                println!("{}", serde_json::json!{{
+                    "package": name,
+                    "channels": channels,
+                }});
+            } else {
+                write!(&mut stdout, "{}", name)?;
+                for channel in channels {
+                    write!(&mut stdout, " {}", channel)?;
+                }
+                writeln!(&mut stdout)?;
             }
-            writeln!(&mut stdout)?;
         }
         Ok(())
     }

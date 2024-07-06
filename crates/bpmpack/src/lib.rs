@@ -436,7 +436,7 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
     let package_filepath = Utf8PathBuf::from_path_buf(PathBuf::from(package_filepath)).expect("failed to get file path");
     let package_filename = package_filepath.file_name().context("failed to get filename")?;
 
-    if !package::is_version_string(&package_version) {
+    if !package::is_valid_version(&package_version) {
         anyhow::bail!("invalid version")
     }
     if require_semver && !package_version.is_semver() {
@@ -634,7 +634,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let mode_matcher = build_mode_matcher(&globs)?;
 
     let package_name = matches.get_one::<String>("name").unwrap();
-    if !package::is_package_name(package_name) {
+    if !package::is_valid_package_name(package_name) {
         anyhow::bail!("invalid package name. (must match [a-zA-Z][a-zA-Z0-9\\-]*)")
     }
 
@@ -645,7 +645,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         Version::new("unversioned")
     } else {
         let package_version = Version::new(matches.get_one::<String>("version").unwrap());
-        if !package::is_version_string(&package_version) {
+        if !package::is_valid_version(&package_version) {
             anyhow::bail!("invalid version")
         }
         if require_semver && !package_version.is_semver() {

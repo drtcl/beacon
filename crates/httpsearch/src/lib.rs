@@ -13,6 +13,7 @@ use anyhow::Result;
 use tracing::trace;
 use url::Url;
 use std::collections::BTreeMap;
+use version::VersionString;
 
 pub use reqwest::blocking::Client;
 
@@ -24,7 +25,7 @@ type LinkText = String;
 type LinkUrlStr = String;
 
 type PackageName = String;
-type PackageVersion = String;
+type PackageVersion = VersionString;
 type PackagefileName = String;
 type ChannelName = String;
 
@@ -54,16 +55,27 @@ impl Report {
     }
     fn add_version(&mut self, pkg_name: &str, version: &str, info: VersionInfo) {
 
-        let map = self.packages.entry(pkg_name.to_string())
+        let version = VersionString::from(version);
+
+        let vmap = self.packages.entry(pkg_name.to_string())
             .or_default();
 
-        if !map.contains_key(version) {
-            map.insert(version.to_string(), info);
+        match vmap.get_mut(&version) {
+            None => {
+                vmap.insert(version, info);
+            }
+            Some(ref mut entry) => {
+                for channel in info.channels {
+                    if !entry.channels.iter().any(|c| c == &channel) {
+                        entry.channels.push(channel.to_string());
+                    }
+                }
+            }
         }
     }
     fn add_channel_version(&mut self, pkg_name: &str, channel: &str, version: &str) {
         if let Some(vmap) = self.packages.get_mut(pkg_name) {
-            if let Some(info) = vmap.get_mut(version) {
+            if let Some(info) = vmap.get_mut(&VersionString::from(version)) {
                 if !info.channels.iter().any(|v| v == channel) {
                     info.channels.push(channel.to_string());
                 }
@@ -82,7 +94,7 @@ impl Link {
     fn version_info(&self) -> Option<(PackageVersion, VersionInfo)> {
         if let Some((name, version)) = package::split_parts(&self.text) {
             return Some((
-                version.to_string(),
+                version.into(),
                 VersionInfo {
                     url: self.url.clone(),
                     filename: self.text.clone(),

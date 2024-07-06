@@ -1,5 +1,4 @@
 #![feature(let_chains)]
-#![feature(fs_try_exists)]
 
 use clap::Command;
 use anyhow::Result;

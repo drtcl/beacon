@@ -297,7 +297,7 @@ impl App {
                 return Ok((
                     search::SingleListing {
                         pkg_name: std::rc::Rc::<str>::from(pkg_name),
-                        version: version.to_string(),
+                        version: version.into(),
                         filename,
                         url: "".into(),
                         channels: vec![],
@@ -333,7 +333,7 @@ impl App {
             } else {
                 // must be a specific version, find it
 
-                versions.retain(|version, _info| version == v);
+                versions.retain(|version, _info| version.as_str() == v);
                 versioning.pinned_to_version = true;
             }
 
@@ -1524,8 +1524,7 @@ impl App {
 
             if let Ok(provider::ProviderFile{packages, ..}) = provider.load_file() {
                 if let Some(versions) = packages.get(&id.name) {
-                    if let Some(x) = versions.get(&id.version) {
-                        //dbg!(x);
+                    if let Some(x) = versions.get(&id.version.as_str().into()) {
 
                         let final_path = join_path_utf8!(&self.config.cache_dir, "packages", &x.filename);
 

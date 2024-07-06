@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::trace;
+use version::VersionString;
 
 const CHANNEL_DIR_PREFIX : &str = "channel_";
 const CHANNELS_FILE : &str = "channels.json";
 
 type FilePath = String;
 type PackageName = String;
-type PackageVersion = String;
+type PackageVersion = VersionString;
 type PackagefileName = String;
 type ChannelName = String;
 
@@ -44,25 +45,31 @@ impl Report {
             packages: PackageList::new(),
         }
     }
-    fn add_version(&mut self, pkg_name: &str, version: &str, mut info: VersionInfo) {
 
-        let mut channels = Vec::new();
-        std::mem::swap(&mut info.channels, &mut channels);
+    fn add_version(&mut self, pkg_name: &str, version: &str, info: VersionInfo) {
 
-        let entry = self.packages.entry(pkg_name.to_string())
-            .or_default()
-            .entry(version.to_string())
-            .or_insert(info);
+        let version = VersionString::from(version);
 
-        for channel in channels {
-            if !entry.channels.iter().any(|c| c == &channel) {
-                entry.channels.push(channel.to_string());
+        let versions = self.packages.entry(pkg_name.to_string())
+            .or_default();
+
+        match versions.get_mut(&version) {
+            None => {
+                versions.insert(version, info);
+            }
+            Some(ref mut entry) => {
+                for channel in info.channels {
+                    if !entry.channels.iter().any(|c| c == &channel) {
+                        entry.channels.push(channel.to_string());
+                    }
+                }
             }
         }
     }
+
     fn add_channel_version(&mut self, pkg_name: &str, channel: &str, version: &str) {
         if let Some(vmap) = self.packages.get_mut(pkg_name) {
-            if let Some(info) = vmap.get_mut(version) {
+            if let Some(info) = vmap.get_mut(&VersionString::from(version)) {
                 if !info.channels.iter().any(|v| v == channel) {
                     info.channels.push(channel.to_string());
                 }

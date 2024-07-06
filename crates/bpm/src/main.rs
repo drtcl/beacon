@@ -1,6 +1,5 @@
 #![feature(let_chains)]
 #![feature(iter_collect_into)]
-#![feature(fs_try_exists)]
 #![feature(io_error_more)]
 
 #![allow(dead_code)]

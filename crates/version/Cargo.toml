@@ -7,5 +7,6 @@ edition = "2021"
 workspace = true
 
 [dependencies]
-semver = { workspace = true }
+semver = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
 version-compare = { workspace = true }

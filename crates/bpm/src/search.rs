@@ -6,12 +6,9 @@ use std::rc::Rc;
 use serde::{Serialize, Deserialize};
 
 pub type PackageName = String;
-pub type Version = String;
+use version::{Version, VersionString};
 pub type Url = String;
 pub type Filename = String;
-
-//#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, PartialEq, Eq, Ord)]
-//struct Version(String);
 
 /// info for a single version
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +27,7 @@ pub struct SingleListing {
     pub channels: Vec<String>,
 }
 
-pub type VersionList = BTreeMap<Version, VersionInfo>;
+pub type VersionList = BTreeMap<VersionString, VersionInfo>;
 pub type PackageList = BTreeMap<PackageName, VersionList>;
 
 pub trait Search {
@@ -45,7 +42,7 @@ pub fn flatten(list: PackageList) -> Vec<SingleListing> {
         for (version, urlfn) in versions {
             ret.push(SingleListing {
                 pkg_name: Rc::clone(&pkg_name),
-                version,
+                version: version.into(),
                 filename: urlfn.filename,
                 url: urlfn.url,
                 channels: urlfn.channels,

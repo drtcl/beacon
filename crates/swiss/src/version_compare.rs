@@ -22,7 +22,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<()> {
     let mut versions = versions.map(|v| version::Version::new(v)).collect::<Vec<_>>();
 
     if skip_invalid {
-        versions.retain(|v| package::is_version_string(v));
+        versions.retain(|v| package::is_valid_version(v.as_str()));
 
         if semver {
             versions.retain(|v| v.is_semver());
@@ -30,7 +30,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<()> {
     } else {
         let mut err = 0;
         for v in &versions {
-            if !package::is_version_string(v) {
+            if !package::is_valid_version(v.as_str()) {
                 eprintln!("error: invalid version string: {}", v);
                 err += 1;
             }

@@ -13,6 +13,7 @@ name = "httpsearch"
 
 [dependencies]
 package = { path = "../package" }
+version = { path = "../version" }
 
 anyhow = { workspace = true }
 regex = { workspace = true }

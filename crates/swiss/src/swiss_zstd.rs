@@ -128,7 +128,7 @@ pub fn main(matches: &clap::ArgMatches) -> Result<()> {
                 };
 
                 if let Some(outname) = outname {
-                    if let Ok(false) = std::fs::try_exists(&outname) {
+                    if let Ok(false) = std::fs::exists(&outname) {
                         make_file = Some(outname);
                     } else {
                         anyhow::bail!("{} already exists", outname);

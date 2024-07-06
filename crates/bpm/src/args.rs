@@ -68,6 +68,7 @@ pub fn get_cli() -> Command {
                 .subcommand(Command::new("channels")
                     .arg(arg!([pkg] "package name substring"))
                     .arg(arg!(--exact  "match package name exactly"))
+                    .arg(arg!(--json "output in json lines format"))
                     .arg(providers_arg())
                 )
         )
