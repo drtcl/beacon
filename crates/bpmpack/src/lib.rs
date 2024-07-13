@@ -68,6 +68,12 @@ enum FileType {
     Link(Utf8PathBuf),
 }
 
+impl FileType {
+    pub fn is_file(&self) -> bool {
+        matches!(self, FileType::File)
+    }
+}
+
 impl From<FileType> for package::FileType {
     fn from(ft: FileType) -> Self {
         match ft {
@@ -833,10 +839,19 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
             });
         }
 
+        let mtime = bpmutil::get_mtime(entry.full_path.as_str());
+
+        let size = if entry.file_type.is_file() {
+            bpmutil::get_filesize(entry.full_path.as_str()).ok()
+        } else {
+            None
+        };
+
         meta.add_file(sanitize_pathbuf(entry.pkg_path), package::FileInfo {
-            hash: entry.hash,
             filetype: entry.file_type.into(),
-            mtime: None,
+            hash: entry.hash,
+            mtime,
+            size,
             volatile: entry.modes.volatile,
         });
     }

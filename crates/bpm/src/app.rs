@@ -577,7 +577,7 @@ impl App {
 
             let (send, recv) = crossbeam::channel::bounded::<(&Utf8PathBuf, &package::FileInfo)>(256);
 
-            let diff_threads = std::cmp::min(8, std::cmp::max(1, std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1)));
+            let diff_threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1).clamp(1, 8);
 
             for _ in 0..diff_threads {
                 let location = &location;
@@ -589,11 +589,39 @@ impl App {
 
                     let mut t_skip_files = HashSet::<Utf8PathBuf>::new();
 
+                    // read a path from the channel
                     while let Ok((path, info)) = recv.recv() {
+
                         let fullpath = join_path_utf8!(location, &path);
-                        if let Ok(true) = fullpath.try_exists() {
-                            if info.filetype.is_file() {
-                                tracing::trace!("hashing {}", fullpath);
+
+                        let file_state = get_filestate(&fullpath);
+
+                        // if the file path exists in the filesystem, it's a regular file and the
+                        // new file is a regular file. We can potentially skip replacing this file,
+                        // check if the current file's contents match the incoming file.
+                        if !file_state.missing && file_state.file && info.filetype.is_file() {
+
+                            // hash the file as a last resort
+                            let mut do_hash = true;
+
+                            // if the file is a different size, it needs replacing
+                            if let Some(new_size) = info.size {
+                                let cur_size = get_filesize(fullpath.as_str());
+                                if let Ok(cur_size) = cur_size && cur_size != new_size {
+                                    do_hash = false;
+                                }
+                            }
+
+                            if do_hash {
+                                // if the file has a different mtime, just replace it
+                                if let Some(mtime) = info.mtime {
+                                    if let Some(cur_mtime) = file_state.mtime && cur_mtime != mtime {
+                                        do_hash = false;
+                                    }
+                                }
+                            }
+
+                            if do_hash {
                                 //let mut file = File::open(&fullpath).context("opening file for reading")?;
                                 //let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
                                 let mut file = File::open(&fullpath).expect("opening file for reading"); //TODO handle error
@@ -602,12 +630,10 @@ impl App {
                                 if Some(&hash) == info.hash.as_ref() {
                                     // this file can be skipped during update
                                     t_skip_files.insert(path.clone());
-                                } else {
-                                    // overwrite this file
-                                    tracing::trace!("hash mismatch {} != {}, re-install", &hash, info.hash.as_ref().unwrap());
                                 }
                             }
                         }
+
                         //std::thread::sleep(std::time::Duration::from_micros(100));
                         diff_bar.inc(1);
                     }

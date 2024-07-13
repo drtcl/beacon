@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 package   = {"path" = "../package"}
 version   = {"path" = "../version"}
+bpmutil   = {"path" = "../bpmutil"}
 anyhow    = { workspace = true }
 blake3    = { workspace = true }
 camino    = { workspace = true, features = ["serde1"]}
