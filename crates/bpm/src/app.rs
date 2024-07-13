@@ -1,16 +1,16 @@
-use crate::*;
-use std::io::BufWriter;
-use std::io::IsTerminal;
+use bpmutil::*;
 use chrono::SubsecRound;
+use crate::*;
 use itertools::Itertools;
 use package::PackageID;
-use std::fs::File;
-use std::io::Seek;
-use std::io::Read;
-use std::collections::HashSet;
+use serde::{Serialize, Deserialize};
 use std::collections::BTreeMap;
-
-use bpmutil::*;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::IsTerminal;
+use std::io::Read;
+use std::io::Seek;
 
 mod list;
 
@@ -506,19 +506,24 @@ impl App {
         let mut new_package_fd = std::fs::File::open(cache_file)?;
 
         //// make sure the checksum matches
-        let (ok, metadata) = package::package_integrity_check(&mut new_package_fd)?;
+        let (ok, new_metadata) = package::package_integrity_check(&mut new_package_fd)?;
         if !ok {
             anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
         } else {
             tracing::trace!("package integrity check pass");
         }
 
-        let new_files = metadata.files.clone();
+        let new_files = new_metadata.files.clone();
         //dbg!(&new_files.keys());
 
         // gather info about the old package (the currently installed version)
         let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently intalled")?;
         let mut old_files = current_pkg_info.metadata.files.clone();
+
+        let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
+        tracing::trace!("installing to the same location {}", location);
+
+        let bars = indicatif::MultiProgress::new();
 
         // old_files -= new_files
         for (path, new_file) in &new_files {
@@ -535,49 +540,126 @@ impl App {
         // these are the files to remove
         let remove_files = old_files;
 
-        let iter = remove_files.iter().map(|(path, info)| {
-            let path = build_pkg_file_path(current_pkg_info, &path).unwrap();
-            (path, info)
-        });
+        let delete_thread = std::thread::spawn({
+            let current_pkg_info = current_pkg_info.clone();
+            let bars = bars.clone();
+            move || {
 
-        let delete_ok = Self::delete_files(iter, false, false);
-        if let Err(e) = delete_ok {
-            eprintln!("error deleting files {:?}", e);
-        }
+                let iter = remove_files.iter().map(|(path, info)| {
+                    let path = build_pkg_file_path(&current_pkg_info, &path).unwrap();
+                    (path, info)
+                });
 
-        let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
-        tracing::trace!("installing to the same location {}", location);
+                let delete_bar = indicatif::ProgressBar::new(remove_files.len() as u64);
+                delete_bar.set_style(indicatif::ProgressStyle::with_template(
+                    " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
+                ).unwrap());
+                let delete_bar = bars.add(delete_bar);
+                let iter = delete_bar.wrap_iter(iter).with_finish(indicatif::ProgressFinish::AndClear);
 
-        let mut skip_files = HashSet::new();
-
-        for (path, info) in &new_files {
-            // if already exists, check hash
-            let fullpath = join_path_utf8!(&location, &path);
-            if let Ok(true) = fullpath.try_exists() {
-
-                if info.filetype.is_file() {
-                    tracing::trace!("getting hash for {}", fullpath);
-                    let mut file = File::open(&fullpath).context("opening file for reading")?;
-                    let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
-
-                    if Some(&hash) == info.hash.as_ref() {
-                        // this file can be skipped during update
-                        skip_files.insert(path);
-                    } else {
-                        // overwrite this file
-                        tracing::trace!("hash mismatch {} != {}, re-install", &hash, info.hash.as_ref().unwrap());
-                    }
+                let delete_ok = Self::delete_files(iter, false, false);
+                if let Err(e) = delete_ok {
+                    eprintln!("error deleting files {:?}", e);
                 }
             }
-        }
+        });
+
+        let diff_bar = indicatif::ProgressBar::new(new_files.len() as u64);
+        diff_bar.set_style(indicatif::ProgressStyle::with_template(
+            " {spinner:.green} diffing  {wide_bar:.blue} {pos}/{len} "
+        ).unwrap());
+        let diff_bar = bars.add(diff_bar);
+
+        let skip_files = std::sync::Mutex::new(HashSet::<Utf8PathBuf>::new());
+
+        // spawn threads for hashing/diffing existing files
+        std::thread::scope(|s| {
+
+            let (send, recv) = crossbeam::channel::bounded::<(&Utf8PathBuf, &package::FileInfo)>(256);
+
+            let diff_threads = std::cmp::min(8, std::cmp::max(1, std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1)));
+
+            for _ in 0..diff_threads {
+                let location = &location;
+                let new_files = &new_files;
+                let skip_files = &skip_files;
+                let recv = recv.clone();
+                let diff_bar = diff_bar.clone();
+                s.spawn(move || {
+
+                    let mut t_skip_files = HashSet::<Utf8PathBuf>::new();
+
+                    while let Ok((path, info)) = recv.recv() {
+                        let fullpath = join_path_utf8!(location, &path);
+                        if let Ok(true) = fullpath.try_exists() {
+                            if info.filetype.is_file() {
+                                tracing::trace!("hashing {}", fullpath);
+                                //let mut file = File::open(&fullpath).context("opening file for reading")?;
+                                //let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
+                                let mut file = File::open(&fullpath).expect("opening file for reading"); //TODO handle error
+                                let hash = blake3_hash_reader(&mut file).expect("blake3 hashing");
+
+                                if Some(&hash) == info.hash.as_ref() {
+                                    // this file can be skipped during update
+                                    t_skip_files.insert(path.clone());
+                                } else {
+                                    // overwrite this file
+                                    tracing::trace!("hash mismatch {} != {}, re-install", &hash, info.hash.as_ref().unwrap());
+                                }
+                            }
+                        }
+                        //std::thread::sleep(std::time::Duration::from_micros(100));
+                        diff_bar.inc(1);
+                    }
+
+                    // merge this threads t_skip_files into the main skip_files
+                    skip_files.lock().unwrap().extend(t_skip_files);
+                });
+            }
+
+            for (path, info) in new_files.iter() {
+                let _ = send.send((path, info));
+            }
+            drop(send);
+        });
+
+        diff_bar.finish_and_clear();
+
+        let mut skip_files = skip_files.into_inner()?;
+
+        //pbar.suspend(|| println!("/hashing files"));
+
+//        for (path, info) in &new_files {
+//            // if already exists, check hash
+//            let fullpath = join_path_utf8!(&location, &path);
+//            if let Ok(true) = fullpath.try_exists() {
+//
+//                if info.filetype.is_file() {
+//                    tracing::trace!("getting hash for {}", fullpath);
+//                    let mut file = File::open(&fullpath).context("opening file for reading")?;
+//                    let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
+//
+//                    if Some(&hash) == info.hash.as_ref() {
+//                        // this file can be skipped during update
+//                        skip_files.insert(path);
+//                    } else {
+//                        // overwrite this file
+//                        tracing::trace!("hash mismatch {} != {}, re-install", &hash, info.hash.as_ref().unwrap());
+//                    }
+//                }
+//            }
+//            pbar.inc(1);
+//        }
+        //pbar.suspend(|| println!("/hashing files"));
 
         //dbg!(&skip_files);
 
-        let pbar = indicatif::ProgressBar::new(new_files.len() as u64);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            "   {msg}\n {spinner:.green} {wide_bar:.green} {pos}/{len} "
+        let update_bar = bars.add(indicatif::ProgressBar::new(new_files.len() as u64));
+
+        update_bar.set_style(indicatif::ProgressStyle::with_template(
+            "   {msg}\n {spinner:.green} updating {wide_bar:.green} {pos}/{len} "
         ).unwrap());
-        pbar.set_prefix(metadata.name.to_string());
+        update_bar.set_prefix(new_metadata.name.to_string());
 
         new_package_fd.rewind()?;
         let mut outer_tar = tar::Archive::new(&mut new_package_fd);
@@ -589,7 +671,7 @@ impl App {
             let mut entry = entry?;
             let path = entry.path()?;
             let path = Utf8PathBuf::from(&path.to_string_lossy());
-            pbar.set_message(String::from(path.as_str()));
+            update_bar.set_message(String::from(path.as_str()));
             if skip_files.remove(&path) {
                 tracing::trace!("skipping   {}", path);
             } else {
@@ -597,12 +679,14 @@ impl App {
                 let _ok = entry.unpack_in(&location);
                 //TODO handle error
             }
-            pbar.inc(1);
+            update_bar.inc(1);
         }
 
-        pbar.finish_and_clear();
+        update_bar.finish_and_clear();
 
-        let mut details = db::DbPkg::new(metadata);
+        delete_thread.join().expect("TODO");
+
+        let mut details = db::DbPkg::new(new_metadata);
         details.location = Some(location);
         details.versioning = versioning;
         let pkg_filename = new_pkg_file.file_name().map(str::to_string);
@@ -931,6 +1015,8 @@ impl App {
         let mut dirs = Vec::new();
 
         for (filepath, fileinfo) in files {
+
+            //std::thread::sleep(std::time::Duration::from_micros(200)); //TODO dd
 
             let filepath = filepath.as_ref();
             let exists = matches!(filepath.try_exists(), Ok(true));

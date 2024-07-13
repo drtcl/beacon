@@ -351,9 +351,12 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         " {spinner:.green} verifying package"
     ).unwrap());
 
-    let metadata = get_metadata(pkg_file).context("error reading package metadata")?;
-
-    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
+    // it can take a while to parse the file list for large packages, do that in a separate thread
+    // while we move on to hashing the package
+    let metadata = read_metadata(pkg_file).context("error reading package metadata")?;
+    let t = std::thread::spawn(move || -> Result<MetaData> {
+        Ok(MetaData::from_reader(&mut std::io::Cursor::new(&metadata))?)
+    });
 
     pkg_file.rewind()?;
     let computed_sum = {
@@ -368,10 +371,15 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
 
         blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
     };
+
+    let metadata = t.join().unwrap(); //TODO handle this error
+    let metadata = metadata?;
+
+    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
     let matches = &computed_sum == described_sum;
     tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
 
-    pbar.finish_and_clear();
+    //pbar.finish_and_clear();
 
     if !matches {
         tracing::error!("package file data hash mismatch {} != {}", computed_sum, described_sum);
@@ -384,7 +392,9 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
     pkg_file.rewind()?;
     {
 
-        let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
+        pbar.set_position(0);
+        pbar.set_length(meta_filelist.len() as u64);
+        //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
         pbar.set_style(indicatif::ProgressStyle::with_template(
             " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
         ).unwrap());
@@ -394,7 +404,6 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         let zstd = zstd::Decoder::new(data_tar_zst)?;
         let mut tar = tar::Archive::new(zstd);
         for ent in tar.entries()? {
-            pbar.inc(1);
             let ent = ent?;
             let path = ent.path()?;
             let path = path.to_string_lossy().to_string();
@@ -404,6 +413,8 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
                 return Ok((false, metadata));
             }
             // TODO also check that the file type matches
+            //std::thread::sleep(std::time::Duration::from_micros(100)); //TODO dd
+            pbar.inc(1);
         }
 
         pbar.finish_and_clear();
@@ -419,6 +430,15 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
     tracing::trace!("package passes integrity check");
 
     Ok((true, metadata))
+}
+
+pub fn read_metadata(pkg_file: &mut File) -> Result<Vec<u8>> {
+    pkg_file.rewind()?;
+    let mut tar = tar::Archive::new(pkg_file);
+    let (mut meta, _size) = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
+    let mut contents = Vec::new();
+    meta.read_to_end(&mut contents)?;
+    Ok(contents)
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
