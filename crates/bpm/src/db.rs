@@ -181,4 +181,14 @@ impl Db {
             }
         }
     }
+
+    pub fn set_versioning(&mut self, pkg_name: &str, versioning: Versioning) {
+        for pkg in &mut self.installed {
+            if pkg.metadata.name == pkg_name {
+                pkg.versioning = versioning;
+                return;
+            }
+        }
+    }
+
 }

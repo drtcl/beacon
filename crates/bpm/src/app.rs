@@ -52,6 +52,11 @@ impl Versioning {
             channel: Some(chan.to_string())
         }
     }
+
+    fn same_as(&self, other: &Self) -> bool {
+        self.pinned_to_channel == other.pinned_to_channel
+            && self.pinned_to_version == other.pinned_to_version
+    }
 }
 
 impl App {
@@ -433,9 +438,28 @@ impl App {
         if let Some(current) = &current_install {
             let version_same = current.metadata.version == version.as_str();
 
+            let pinning_same = current.versioning.same_as(&versioning);
+
             if version_same {
                 if !reinstall {
-                    println!("No change. Package {} at version {} is already intalled", pkg_name, version);
+
+                    println!("No change. Package {} at version {} is already installed.", pkg_name, version);
+
+                    // may not need to update because versions are the same,
+                    // but may be updating from specific version to a channel or from a channel to
+                    // a version (changing the pinning). Update pinning info.
+                    if !pinning_same && update {
+                        self.db.set_versioning(pkg_name, versioning.clone());
+                        self.save_db()?;
+                        if versioning.pinned_to_channel {
+                            println!("Updated pin to channel {}.", versioning.channel.as_deref().unwrap_or("?"));
+                        } else if versioning.pinned_to_version {
+                            println!("Updated pin to version {}.", version.as_str());
+                        } else {
+                            println!("Update pinning, no longer pinned to a version or channel");
+                        }
+                    }
+
                     return Ok(());
                 }
             } else if !update {
@@ -517,7 +541,7 @@ impl App {
         //dbg!(&new_files.keys());
 
         // gather info about the old package (the currently installed version)
-        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently intalled")?;
+        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently installed")?;
         let mut old_files = current_pkg_info.metadata.files.clone();
 
         let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
@@ -550,11 +574,11 @@ impl App {
                     (path, info)
                 });
 
-                let delete_bar = indicatif::ProgressBar::new(remove_files.len() as u64);
+                let delete_bar = bars.add(indicatif::ProgressBar::new(remove_files.len() as u64));
                 delete_bar.set_style(indicatif::ProgressStyle::with_template(
                     " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
                 ).unwrap());
-                let delete_bar = bars.add(delete_bar);
+
                 let iter = delete_bar.wrap_iter(iter).with_finish(indicatif::ProgressFinish::AndClear);
 
                 let delete_ok = Self::delete_files(iter, false, false);
@@ -622,14 +646,15 @@ impl App {
                             }
 
                             if do_hash {
-                                //let mut file = File::open(&fullpath).context("opening file for reading")?;
-                                //let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
-                                let mut file = File::open(&fullpath).expect("opening file for reading"); //TODO handle error
-                                let hash = blake3_hash_reader(&mut file).expect("blake3 hashing");
-
-                                if Some(&hash) == info.hash.as_ref() {
-                                    // this file can be skipped during update
-                                    t_skip_files.insert(path.clone());
+                                if let Some(new_hash) = info.hash.as_ref() {
+                                    if let Ok(mut file) = File::open(&fullpath) {
+                                        if let Ok(hash) = blake3_hash_reader(&mut file) {
+                                            if &hash == new_hash {
+                                                // this file can be skipped during update
+                                                t_skip_files.insert(path.clone());
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -653,34 +678,15 @@ impl App {
 
         let mut skip_files = skip_files.into_inner()?;
 
-        //pbar.suspend(|| println!("/hashing files"));
+        // wait for deletes to be finished before starting unpacks,
+        // there could be conflicting file types
+        if let Err(_) = delete_thread.join() {
+            anyhow::bail!("Error in file deletion thread");
+        }
 
-//        for (path, info) in &new_files {
-//            // if already exists, check hash
-//            let fullpath = join_path_utf8!(&location, &path);
-//            if let Ok(true) = fullpath.try_exists() {
-//
-//                if info.filetype.is_file() {
-//                    tracing::trace!("getting hash for {}", fullpath);
-//                    let mut file = File::open(&fullpath).context("opening file for reading")?;
-//                    let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
-//
-//                    if Some(&hash) == info.hash.as_ref() {
-//                        // this file can be skipped during update
-//                        skip_files.insert(path);
-//                    } else {
-//                        // overwrite this file
-//                        tracing::trace!("hash mismatch {} != {}, re-install", &hash, info.hash.as_ref().unwrap());
-//                    }
-//                }
-//            }
-//            pbar.inc(1);
-//        }
-        //pbar.suspend(|| println!("/hashing files"));
-
-        //dbg!(&skip_files);
-
-        let update_bar = bars.add(indicatif::ProgressBar::new(new_files.len() as u64));
+        let update_bar = bars.add(indicatif::ProgressBar::new((new_files.len() - skip_files.len()) as u64));
+        //let update_bar = bars.add(indicatif::ProgressBar::new(new_files.len() as u64));
+        //update_bar.set_position(skip_files.len() as u64);
 
         update_bar.set_style(indicatif::ProgressStyle::with_template(
             "   {msg}\n {spinner:.green} updating {wide_bar:.green} {pos}/{len} "
@@ -697,20 +703,18 @@ impl App {
             let mut entry = entry?;
             let path = entry.path()?;
             let path = Utf8PathBuf::from(&path.to_string_lossy());
-            update_bar.set_message(String::from(path.as_str()));
             if skip_files.remove(&path) {
                 tracing::trace!("skipping   {}", path);
             } else {
                 tracing::trace!("updating   {}", path);
+                update_bar.set_message(String::from(path.as_str()));
                 let _ok = entry.unpack_in(&location);
                 //TODO handle error
+                update_bar.inc(1);
             }
-            update_bar.inc(1);
         }
 
         update_bar.finish_and_clear();
-
-        delete_thread.join().expect("TODO");
 
         let mut details = db::DbPkg::new(new_metadata);
         details.location = Some(location);
@@ -1032,6 +1036,8 @@ impl App {
         Ok(())
     }
 
+    /// Iterate a collection of files and delete them.
+    /// Delete symlinks and regular files first, then delete all directories afterward.
     fn delete_files<'a, I, P>(files: I, verbose: bool, remove_unowned: bool) -> AResult<()>
         where
             P : std::fmt::Debug + AsRef<Utf8Path>,
