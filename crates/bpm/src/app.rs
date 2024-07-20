@@ -382,7 +382,9 @@ impl App {
 
     /// `bpm install`
     ///
-    /// `bpm install foo` or `bpm install foo@1.2.3` or `bpm install path/to/foo_1.2.3.bpm`
+    /// `bpm install foo`
+    /// or `bpm install foo@1.2.3`
+    /// or `bpm install path/to/foo_1.2.3.bpm`
     /// install a package from a provider or directly from a file
     pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool, reinstall: bool) -> AResult<()> {
 
@@ -466,7 +468,7 @@ impl App {
                 println!("Package {} ({}) is already installed. Pass --update to install a different version.", pkg_name, current.metadata.version);
                 return Ok(());
             } else {
-                println!("Updating {} from verson {} to {}", pkg_name, current.metadata.version, version);
+                println!("Updating {} from version {} to {}", pkg_name, current.metadata.version, version);
             }
         }
 
@@ -581,7 +583,7 @@ impl App {
 
                 let iter = delete_bar.wrap_iter(iter).with_finish(indicatif::ProgressFinish::AndClear);
 
-                let delete_ok = Self::delete_files(iter, false, false);
+                let delete_ok = Self::delete_files(iter, false, true);
                 if let Err(e) = delete_ok {
                     eprintln!("error deleting files {:?}", e);
                 }
@@ -706,7 +708,7 @@ impl App {
             if skip_files.remove(&path) {
                 tracing::trace!("skipping   {}", path);
             } else {
-                tracing::trace!("updating   {}", path);
+                tracing::debug!("updating   {}", path);
                 update_bar.set_message(String::from(path.as_str()));
                 let _ok = entry.unpack_in(&location);
                 //TODO handle error
@@ -773,9 +775,14 @@ impl App {
             let result = self.find_package_version(&pkg.metadata.name, channel.as_deref());
 
             if let Ok((listing, versioning)) = result {
-                //dbg!(&listing);
-                //dbg!(&versioning);
                 let version = listing.version;
+
+                // if the version is the same as already installed, skip the update
+                if version == Version::from(pkg.metadata.version.as_str()) {
+                    //println!("{} already up-to-date", pkg.metadata.name);
+                    continue;
+                }
+
                 //println!("{}: updating to {}", pkg.metadata.name, version);
 
                 let cached_file = self.cache_package_require(&PackageID{
@@ -794,9 +801,13 @@ impl App {
             }
         }
 
-        println!("updates:");
-        for (name, oldv, newv, _versioning, _pkgfile) in &updates {
-            println!("{}: {} -> {}", name, oldv, newv);
+        if !updates.is_empty() {
+            println!("{} package{} to update:", updates.len(), tern!(updates.len() > 1, "s", ""));
+            for (name, oldv, newv, _versioning, _pkgfile) in &updates {
+                println!("  {}: {} -> {}", name, oldv, newv);
+            }
+        } else {
+            println!("No updates to apply");
         }
 
         //TODO can put confirmation prompt here
@@ -1048,14 +1059,13 @@ impl App {
 
         for (filepath, fileinfo) in files {
 
-            //std::thread::sleep(std::time::Duration::from_micros(200)); //TODO dd
-
             let filepath = filepath.as_ref();
             let exists = matches!(filepath.try_exists(), Ok(true));
 
             match &fileinfo.filetype {
                 package::FileType::Link(to) => {
                     vout!(verbose, "delete {filepath} -> {to}");
+                    tracing::trace!("delete  {filepath}");
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
                         eprintln!("error deleting {filepath}: {e}");
@@ -1063,6 +1073,7 @@ impl App {
                 }
                 package::FileType::File => {
                     vout!(verbose, "delete {filepath}");
+                    tracing::trace!("delete  {filepath}");
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
                         eprintln!("error deleting {filepath}: {e}");
@@ -1077,6 +1088,7 @@ impl App {
         dirs.reverse();
         for path in dirs {
             vout!(verbose, "delete {path}");
+            tracing::trace!("delete  {path}");
 
             let exists = matches!(path.try_exists(), Ok(true));
             let e = if remove_unowned {
@@ -1469,9 +1481,18 @@ impl App {
     }
 
     /// `bpm cache fetch name@version`
+    /// or
+    /// `bpm cache fetch /path/to/packagefile`
     pub fn cache_fetch(&mut self, mut pkg_name: &str) -> AResult<()> {
 
         tracing::trace!("cache fetch {}", pkg_name);
+
+        if let Some((path, name, v)) = Self::is_package_file_arg(pkg_name) {
+            tracing::trace!("cache fetch directly from file {}", path);
+            self.cache_store_file(&path)?;
+            let _ = self.cache_touch(name, Some(v.to_string()).as_ref(), None);
+            return Ok(());
+        }
 
         let mut split = pkg_name.split('@');
 
@@ -1616,10 +1637,7 @@ impl App {
 
             pbar.finish_and_clear();
 
-            // TODO
-            // validate the package
-            //let x = package::package_integrity_check_path(&cache_path);
-            //dbg!(&x);
+            // TODO could validate the package here, and remove it if it fails
         }
 
         Ok(cache_path)

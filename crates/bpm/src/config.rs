@@ -203,10 +203,12 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             "windows"
         } else if cfg!(target_os="linux") {
             "linux"
-        } else if cfg!(unix) {
-            "unix"
+        } else if cfg!(target_os="macos") {
+            "darwin"
         } else if cfg!(target_family="wasm") {
             "wasm"
+        } else if cfg!(unix) {
+            "unix"
         } else {
             "unknown"
         };
