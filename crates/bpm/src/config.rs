@@ -1,12 +1,32 @@
 use anyhow::Context;
+use camino::Utf8PathBuf;
 use crate::AResult;
 use crate::provider::Provider;
 use serde_derive::Deserialize;
-use std::io::Read;
-use std::path::Path;
-use camino::Utf8PathBuf;
 use std::fs::File;
 use std::io::BufReader;
+use std::io::Read;
+use std::path::Path;
+use std::sync::OnceLock;
+
+static CONFIG_PATH: OnceLock<Utf8PathBuf> = OnceLock::new();
+
+pub fn store_config_path(path: Utf8PathBuf) {
+    CONFIG_PATH.get_or_init(|| path);
+}
+
+pub fn get_config_path() -> Option<&'static Utf8PathBuf> {
+    CONFIG_PATH.get()
+}
+
+pub fn get_config_dir() -> Option<&'static camino::Utf8Path> {
+    if let Some(path) = get_config_path() {
+        path.parent()
+    } else {
+        None
+    }
+}
+
 
 /// the main config struct
 #[derive(Debug)]
@@ -64,22 +84,22 @@ impl Config {
             toml::from_str::<ConfigToml>(&contents).context("failed to parse config")?
         };
 
-        let cache_dir = Utf8PathBuf::from(path_replace(toml.cache.dir));
-        let db_file = Utf8PathBuf::from(path_replace(toml.database));
+        let cache_dir = path_replace(toml.cache.dir)?.into_path();
+        let db_file = path_replace(toml.database)?.into_path();
         let cache_retention = humantime::parse_duration(&toml.cache.retention).context("invalid cache retention")?;
 
         let mut mounts = Vec::new();
         for mount in toml.mount.into_iter() {
             match mount {
                 (name, toml::Value::String(ref val)) => {
-                    let path = Utf8PathBuf::from(path_replace(val));
-                    if !path.exists() {
-                        eprintln!("warning: mount '{}', path '{}' does not exist", name, path);
+                    let path = path_replace(val)?;
+                    if !path.path().exists() {
+                        eprintln!("warning: mount '{}', path '{}' does not exist", name, path.path());
                     } else {
                         //let canon = path.canonicalize().expect("failed to canonicalize path");
                         //println!("canon {:?}", canon);
                     }
-                    mounts.push((name, path));
+                    mounts.push((name, path.into_path()));
                 },
                 (name, _) => {
                     return Err(anyhow::anyhow!("invalid mount {}", name));
@@ -102,7 +122,7 @@ impl Config {
         for p in toml.providers.into_iter() {
             match p {
                 (name, toml::Value::String(ref uri)) => {
-                    let uri = path_replace(uri);
+                    let uri = provider_replace(uri)?;
                     let provider = Provider::new(name, uri, &cache_dir)?;
                     providers.push(provider);
                 }
@@ -113,7 +133,7 @@ impl Config {
                             return Err(anyhow::anyhow!("invalid provider {}", name));
                         }
                         let uri = uri.unwrap();
-                        let uri = path_replace(uri);
+                        let uri = provider_replace(uri)?;
                         let provider = Provider::new(name.clone(), uri, &cache_dir)?;
                         providers.push(provider);
                     }
@@ -177,25 +197,91 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
+enum PathType {
+    Relative{
+        path: Utf8PathBuf,
+        relative_to: Utf8PathBuf,
+    },
+    Absolute(Utf8PathBuf),
+}
+
+impl PathType {
+    fn path(&self) -> &Utf8PathBuf {
+        match self {
+            Self::Relative{path, ..} => path,
+            Self::Absolute(path) => path,
+        }
+    }
+    fn into_path(self) -> Utf8PathBuf {
+        match self {
+            Self::Relative{path, ..} => path,
+            Self::Absolute(path) => path,
+        }
+    }
+}
+
+
 /// replace variables within a path
-/// - `${BPM}` => dir of bpm binary
-/// - `${THIS}` => dir of the config file
-/// - `${OS}` => "linux", "windows", "wasm", "unix", "unknown"
-/// - `${ARCH3264}` => "64" or "32"
-/// - `${ARCHX8664}` => "x86" or "x86_64"
-fn path_replace<S: Into<String>>(path: S) -> String {
+/// - `${BPM}` => dir of bpm binary, must be at the start of the path
+/// - `${THIS}` => dir of the config file, must be at the start of the path
+/// - and anything replaced by config_replace()
+fn path_replace<S: Into<String>>(path: S) -> anyhow::Result<PathType> {
 
     let mut path = path.into();
+    let mut relative = None;
 
-    if path.contains("${BPM}") {
+    // ${BPM} must be the first thing in the string
+    if path.starts_with("${BPM}") {
         let cur_exe = std::env::current_exe().expect("failed to get current exe path");
-        let exe_dir = cur_exe.parent().unwrap().to_str().unwrap();
-        path = path.replace("${BPM}", exe_dir);
+        let exe_dir = Utf8PathBuf::from(cur_exe.parent().unwrap().to_str().context("invalid path, not utf8")?);
+        path = path.replacen("${BPM}", exe_dir.as_str(), 1);
+        relative = Some(exe_dir);
     }
 
-    //if path.contains("${THIS}") {
-        //todo!("NYI");
-    //}
+    if path.contains("${BPM}") {
+        // more ${BPM} found in the middle of the path
+        anyhow::bail!("Invalid ${{BPM}} substitution: '{path}'");
+    }
+
+    // ${THIS} must be the first thing in the string
+    if path.starts_with("${THIS}") {
+        if let Some(dir) = get_config_dir() && dir.is_absolute() {
+            path = path.replacen("${THIS}", dir.as_str(), 1);
+            relative = Some(dir.to_path_buf());
+        } else {
+            anyhow::bail!("Cannot substitute ${{THIS}} when config path is unknown");
+        }
+    }
+
+    if path.contains("${THIS}") {
+        // more ${THIS} found in the middle of the path
+        anyhow::bail!("Invalid ${{THIS}} substitution: '{path}'");
+    }
+
+    config_replace(&mut path);
+
+    let path = Utf8PathBuf::from(path);
+    if path.is_relative() {
+        anyhow::bail!("Invalid naked relative path '{path}' in config file");
+    }
+
+    if let Some(relative) = relative {
+        Ok(PathType::Relative{
+            path: path.into(),
+            relative_to: relative,
+        })
+    } else {
+        Ok(PathType::Absolute(path.into()))
+    }
+}
+
+/// replace variables within a path
+/// - `${OS}` => "linux", "windows", "darwin", "wasm", "unix", "unknown"
+/// - `${ARCH3264}` => "64" or "32"
+/// - `${POINTER_WIDTH}` => "64" or "32"
+/// - `${ARCHX8664}` => "x86" or "x86_64"
+fn config_replace(path: &mut String) {
 
     if path.contains("${OS}") {
 
@@ -213,7 +299,7 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             "unknown"
         };
 
-        path = path.replace("${OS}", os);
+        *path = path.replace("${OS}", os);
     }
 
     if path.contains("${ARCH3264}") {
@@ -226,7 +312,7 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             panic!("unhandled architecture");
         };
 
-        path = path.replace("${ARCH3264}", arch);
+        *path = path.replace("${ARCH3264}", arch);
     }
 
     if path.contains("${POINTER_WIDTH}") {
@@ -236,10 +322,10 @@ fn path_replace<S: Into<String>>(path: S) -> String {
         } else if cfg!(target_pointer_width="64") {
             "64"
         } else {
-            panic!("unhandled architecture");
+            panic!("unhandled pointer width (not 32 or 64)");
         };
 
-        path = path.replace("${POINTER_WIDTH}", arch);
+        *path = path.replace("${POINTER_WIDTH}", arch);
     }
 
     if path.contains("${ARCHX8664}") {
@@ -256,10 +342,29 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             panic!("unhandled architecture");
         };
 
-        path = path.replace("${ARCHX8664}", arch);
+        *path = path.replace("${ARCHX8664}", arch);
     }
+}
 
-    path
+fn provider_replace(uri: &str) -> anyhow::Result<String> {
 
-    //PathBuf::from(path)
+    if uri.starts_with("file://") {
+
+        let path = uri.strip_prefix("file://").unwrap();
+        let path = path_replace(path)?.into_path();
+        return Ok(format!("file://{path}"));
+
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+
+        let mut uri = String::from(uri);
+        config_replace(&mut uri);
+        return Ok(uri);
+
+    } else {
+
+        eprintln!("warning: unrecognized provider type");
+        let mut uri = String::from(uri);
+        config_replace(&mut uri);
+        return Ok(uri);
+    }
 }

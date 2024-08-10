@@ -661,7 +661,6 @@ impl App {
                             }
                         }
 
-                        //std::thread::sleep(std::time::Duration::from_micros(100));
                         diff_bar.inc(1);
                     }
 

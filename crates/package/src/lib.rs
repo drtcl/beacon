@@ -376,8 +376,7 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
     };
 
-    let metadata = meta_thread.join().unwrap(); //TODO handle this error
-    let metadata = metadata?;
+    let metadata = meta_thread.join().unwrap()?; // unwrapping an error is only possible on a panic
 
     let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
     let matches = &computed_sum == described_sum;
@@ -417,7 +416,6 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
                 return Ok((false, metadata));
             }
             // TODO also check that the file type matches
-            //std::thread::sleep(std::time::Duration::from_micros(100)); //TODO dd
             pbar.inc(1);
         }
 

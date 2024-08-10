@@ -35,14 +35,14 @@ impl Provider {
         let mut cache_file = join_path_utf8!(cache_dir, "provider", &name);
         cache_file.set_extension("json");
 
-        const FS_PRE: &str = "fs://";
+        const FILE_PRE: &str = "file://";
         const HTTP_PRE: &str = "http://";
         const HTTPS_PRE: &str = "https://";
 
         let inner: Box<dyn Provide>;
 
-        if uri.starts_with(FS_PRE) {
-            let uri = uri.strip_prefix(FS_PRE).unwrap();
+        if uri.starts_with(FILE_PRE) {
+            let uri = uri.strip_prefix(FILE_PRE).unwrap();
             inner = Box::new(source::filesystem::FileSystem::new(uri));
         } else if uri.starts_with(HTTP_PRE) || uri.starts_with(HTTPS_PRE) {
             inner = Box::new(source::http::Http::new(uri.clone()));
