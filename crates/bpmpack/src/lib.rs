@@ -595,7 +595,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
     let verbose = *matches.get_one::<bool>("verbose").unwrap();
-    let mount = matches.get_one::<String>("mount").unwrap();
+    let mount = matches.get_one::<String>("mount");
     let require_semver = *matches.get_one::<bool>("semver").unwrap();
 
     let compress_level = *matches.get_one::<u32>("complevel").expect("expected compression level") as i32;
@@ -875,7 +875,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // fill in some more meta data and write the file
     meta.data_hash = Some(data_tar_hash.clone());
     meta.data_size = uncompressed_size;
-    meta.mount = Some(mount.clone());
+    meta.mount = mount.cloned();
     let mut metafile = tempfile::Builder::new().prefix(&format!("{}.{}.temp", package_name, package::META_FILE_NAME)).tempfile_in(&output_dir)?;
     let path = metafile.path();
     tracing::debug!("using temp meta file at {}", path.display());

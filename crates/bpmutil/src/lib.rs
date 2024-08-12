@@ -9,6 +9,8 @@ pub fn blake3_hash_reader<R: Read>(mut read: R) -> std::io::Result<String> {
     Ok(hash)
 }
 
+/// Get the mtime of a file.
+/// If the file is a symlink, this gives info about the symlink, not the target
 pub fn get_mtime(path: impl AsRef<str>) -> Option<u64> {
 
     std::fs::symlink_metadata(path.as_ref()).ok()
@@ -17,6 +19,8 @@ pub fn get_mtime(path: impl AsRef<str>) -> Option<u64> {
         .map(|mtime| mtime.as_secs())
 }
 
+/// Get the size of a file.
+/// If the file is a symlink, this gives info about the symlink, not the target
 pub fn get_filesize(path: &str) -> std::io::Result<u64> {
     std::fs::symlink_metadata(path).map(|f| f.len())
 }

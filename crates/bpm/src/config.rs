@@ -2,7 +2,9 @@ use anyhow::Context;
 use camino::Utf8PathBuf;
 use crate::AResult;
 use crate::provider::Provider;
-use serde_derive::Deserialize;
+use serde::{Serialize, Deserialize};
+use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::Read;
@@ -27,7 +29,6 @@ pub fn get_config_dir() -> Option<&'static camino::Utf8Path> {
     }
 }
 
-
 /// the main config struct
 #[derive(Debug)]
 pub struct Config {
@@ -40,28 +41,89 @@ pub struct Config {
 
 #[derive(Debug)]
 pub struct MountConfig {
-    pub use_default_target: bool,
-    pub default_target: Option<Utf8PathBuf>,
-    pub mounts: Vec<(String, Utf8PathBuf)>,
+
+    /// name of default mount
+    pub default_target: Option<String>,
+
+    /// [name, path]
+    pub mounts: Vec<(String, PathType)>,
 }
 
 #[derive(Debug)]
 pub enum MountPoint {
-    Specified(Utf8PathBuf),
-    Default(Utf8PathBuf),
+    Specified(PathType),
+    Default(PathType),
     DefaultDisabled,
     Invalid {
         name: String,
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RelativeToAnchor {
+    Bpm,
+    Config,
+}
+
+impl RelativeToAnchor {
+    pub fn path(&self) -> Option<Utf8PathBuf> {
+        match self {
+            Self::Bpm => {
+                std::env::current_exe()
+                    .map(|p| p.parent().map(Path::to_path_buf))
+                    .ok()
+                    .flatten()
+                    .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+
+            },
+            Self::Config => {
+                get_config_dir().map(ToOwned::to_owned)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PathType {
+    Relative{
+        path: Utf8PathBuf,
+        relative_to: RelativeToAnchor,
+    },
+    #[serde(untagged)]
+    Absolute(Utf8PathBuf),
+}
+
+impl PathType {
+    pub fn full_path(&self) -> anyhow::Result<Utf8PathBuf> {
+        match self {
+            Self::Relative{path, relative_to} => {
+                if let Some(rel) = relative_to.path() {
+                    Ok(crate::join_path_utf8!(rel, path))
+                } else {
+                    anyhow::bail!("No relative path anchor")
+                }
+            }
+            Self::Absolute(path) => Ok(path.to_owned())
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ConfigToml {
     database: String,
-    use_default_target: bool,
     providers: toml::value::Table,
-    mount: toml::value::Table,
+    mount: HashMap<String, MountToml>,
     cache: CacheToml,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MountToml {
+    JustPath(String),
+    Table {
+        default: bool,
+        path: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,38 +146,34 @@ impl Config {
             toml::from_str::<ConfigToml>(&contents).context("failed to parse config")?
         };
 
-        let cache_dir = path_replace(toml.cache.dir)?.into_path();
-        let db_file = path_replace(toml.database)?.into_path();
+        let cache_dir = path_replace(toml.cache.dir)?.full_path()?;
+        let db_file = path_replace(toml.database)?.full_path()?;
         let cache_retention = humantime::parse_duration(&toml.cache.retention).context("invalid cache retention")?;
 
         let mut mounts = Vec::new();
-        for mount in toml.mount.into_iter() {
-            match mount {
-                (name, toml::Value::String(ref val)) => {
-                    let path = path_replace(val)?;
-                    if !path.path().exists() {
-                        eprintln!("warning: mount '{}', path '{}' does not exist", name, path.path());
-                    } else {
-                        //let canon = path.canonicalize().expect("failed to canonicalize path");
-                        //println!("canon {:?}", canon);
-                    }
-                    mounts.push((name, path.into_path()));
-                },
-                (name, _) => {
-                    return Err(anyhow::anyhow!("invalid mount {}", name));
-                }
-            }
-        }
+        let mut default_target = None;
+        for (name, mount) in toml.mount {
 
-        let mut mount = MountConfig {
-            use_default_target: toml.use_default_target,
-            default_target: None,
-            mounts,
-        };
-        // extract the TARGET mount if it was defined
-        if let Some(idx) = mount.mounts.iter().position(|e| e.0 == "TARGET") {
-            let (_name, path) = mount.mounts.remove(idx);
-            mount.default_target = Some(path);
+            let (path, is_default) = match mount {
+                MountToml::JustPath(path) => (path, false),
+                MountToml::Table { default, path } => (path, default),
+            };
+
+            let path = path_replace(path)?;
+
+            if is_default {
+                if default_target.is_some() {
+                    anyhow::bail!("mutliple default mount points");
+                }
+                default_target = Some(name.clone());
+            }
+
+            let full_path = path.full_path()?;
+            if !full_path.exists() {
+                eprintln!("warning: mount '{}', path '{}' does not exist", name, full_path);
+            }
+
+            mounts.push((name, path));
         }
 
         let mut providers: Vec<Provider> = Vec::new();
@@ -146,10 +204,13 @@ impl Config {
 
         let config = Config {
             cache_dir,
+            cache_retention,
             db_file,
             providers,
-            mount,
-            cache_retention,
+            mount : MountConfig {
+                default_target,
+                mounts,
+            },
         };
 
         //dbg!(&config);
@@ -162,65 +223,31 @@ impl Config {
         Self::from_reader(read)
     }
 
+    /// Given a name (from a package definition) find
+    /// and return the mount point from the config
     pub fn get_mountpoint(&self, name: Option<&str>) -> MountPoint {
         match name {
             None => {
-                if !self.mount.use_default_target {
-                    MountPoint::DefaultDisabled
-                } else {
-                    match &self.mount.default_target {
-                        Some(path) => MountPoint::Default(path.clone()),
-                        None => MountPoint::Invalid{ name: "TARGET".into() },
-                    }
-                }
-            },
-            Some(name) => {
-                if name == "TARGET" {
-                    if !self.mount.use_default_target {
-                        MountPoint::DefaultDisabled
-                    } else {
-                        match &self.mount.default_target {
-                            Some(path) => MountPoint::Specified(path.clone()),
-                            None => MountPoint::Invalid{ name: "TARGET".into() },
-                        }
-                    }
-                } else {
+                if let Some(name) = &self.mount.default_target {
                     for (n, path) in &self.mount.mounts {
                         if name == n {
-                            return MountPoint::Specified(path.clone());
+                            return MountPoint::Default(path.clone());
                         }
                     }
-                    MountPoint::Invalid{name: name.to_string()}
                 }
+                MountPoint::DefaultDisabled
+            },
+            Some(name) => {
+                for (n, path) in &self.mount.mounts {
+                    if name == n {
+                        return MountPoint::Specified(path.clone());
+                    }
+                }
+                MountPoint::Invalid{name: name.to_string()}
             }
         }
     }
 }
-
-#[derive(Debug)]
-enum PathType {
-    Relative{
-        path: Utf8PathBuf,
-        relative_to: Utf8PathBuf,
-    },
-    Absolute(Utf8PathBuf),
-}
-
-impl PathType {
-    fn path(&self) -> &Utf8PathBuf {
-        match self {
-            Self::Relative{path, ..} => path,
-            Self::Absolute(path) => path,
-        }
-    }
-    fn into_path(self) -> Utf8PathBuf {
-        match self {
-            Self::Relative{path, ..} => path,
-            Self::Absolute(path) => path,
-        }
-    }
-}
-
 
 /// replace variables within a path
 /// - `${BPM}` => dir of bpm binary, must be at the start of the path
@@ -228,15 +255,15 @@ impl PathType {
 /// - and anything replaced by config_replace()
 fn path_replace<S: Into<String>>(path: S) -> anyhow::Result<PathType> {
 
-    let mut path = path.into();
+    let mut path : String = path.into();
     let mut relative = None;
 
     // ${BPM} must be the first thing in the string
-    if path.starts_with("${BPM}") {
+    if path.starts_with("${BPM}/") {
         let cur_exe = std::env::current_exe().expect("failed to get current exe path");
         let exe_dir = Utf8PathBuf::from(cur_exe.parent().unwrap().to_str().context("invalid path, not utf8")?);
-        path = path.replacen("${BPM}", exe_dir.as_str(), 1);
-        relative = Some(exe_dir);
+        path = path.strip_prefix("${BPM}/").unwrap().into();
+        relative = Some(RelativeToAnchor::Bpm);
     }
 
     if path.contains("${BPM}") {
@@ -245,10 +272,10 @@ fn path_replace<S: Into<String>>(path: S) -> anyhow::Result<PathType> {
     }
 
     // ${THIS} must be the first thing in the string
-    if path.starts_with("${THIS}") {
+    if path.starts_with("${THIS}/") {
         if let Some(dir) = get_config_dir() && dir.is_absolute() {
-            path = path.replacen("${THIS}", dir.as_str(), 1);
-            relative = Some(dir.to_path_buf());
+            path = path.strip_prefix("${THIS}/").unwrap().into();
+            relative = Some(RelativeToAnchor::Config);
         } else {
             anyhow::bail!("Cannot substitute ${{THIS}} when config path is unknown");
         }
@@ -262,17 +289,17 @@ fn path_replace<S: Into<String>>(path: S) -> anyhow::Result<PathType> {
     config_replace(&mut path);
 
     let path = Utf8PathBuf::from(path);
-    if path.is_relative() {
+    if relative.is_none() && path.is_relative() {
         anyhow::bail!("Invalid naked relative path '{path}' in config file");
     }
 
     if let Some(relative) = relative {
         Ok(PathType::Relative{
-            path: path.into(),
+            path,
             relative_to: relative,
         })
     } else {
-        Ok(PathType::Absolute(path.into()))
+        Ok(PathType::Absolute(path))
     }
 }
 
@@ -351,7 +378,7 @@ fn provider_replace(uri: &str) -> anyhow::Result<String> {
     if uri.starts_with("file://") {
 
         let path = uri.strip_prefix("file://").unwrap();
-        let path = path_replace(path)?.into_path();
+        let path = path_replace(path)?.full_path()?;
         return Ok(format!("file://{path}"));
 
     } else if uri.starts_with("http://") || uri.starts_with("https://") {

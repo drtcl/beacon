@@ -112,7 +112,7 @@ Example `bpm_config.toml`:
 
     [providers]
     test1 = "http://localhost:8000/pkg/${OS}/"
-    test2 = "fs:///path/to/packages/"
+    test2 = "file:///path/to/packages/"
 
 ## String Replacements
 
@@ -131,10 +131,12 @@ bpm_config.toml:
 | key | value |
 |-----|-------|
 | `BPM` | directory of the bpm executable |
-| `OS`  | `linux,` `unix,` `windows,` `darwin`, `wasm,` `unknown` |
+| `THIS` | directory of the config file |
+| `OS`  | `linux`, `unix`, `windows`, `darwin`, `wasm`, `unknown` |
 | `ARCHX8664` | `x86`, `x86_64`, `arm`, or `aarch64` |
-| `ARCH3264` | `32` or `64` |
-| `POINTER_WIDTH` | `32` or `64` |
+| `ARCH3264` or `POINTER_WIDTH` | `32` or `64` |
+
+Note: `BPM` and `THIS` are only valid as prefixes to a path. Example: `"${BPM}/path/parts/`, `${THIS}/../path/parts`, or for a provider `file://{$BPM}/pkg/path"`.
 
 ## Mount Points
 All packages are install into a *mount point*.

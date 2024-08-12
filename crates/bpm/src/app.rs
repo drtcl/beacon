@@ -23,7 +23,7 @@ pub struct App {
     pub provider_filter: provider::ProviderFilter,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Versioning {
     pub pinned_to_version: bool,
     pub pinned_to_channel: bool,
@@ -51,11 +51,6 @@ impl Versioning {
             pinned_to_channel: true,
             channel: Some(chan.to_string())
         }
-    }
-
-    fn same_as(&self, other: &Self) -> bool {
-        self.pinned_to_channel == other.pinned_to_channel
-            && self.pinned_to_version == other.pinned_to_version
     }
 }
 
@@ -166,14 +161,14 @@ impl App {
         Ok(merged_results)
     }
 
-    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<Utf8PathBuf> {
-        let pkg_mount_point = metadata.mount.as_deref();
-        let mount_point = self.config.get_mountpoint(pkg_mount_point);
+    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<config::PathType> {
+        use config::MountPoint::*;
+        let mount_point = self.config.get_mountpoint(metadata.mount.as_deref());
         match mount_point {
-            config::MountPoint::Specified(mp) |
-            config::MountPoint::Default(mp) => Ok(mp),
-            config::MountPoint::DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
-            config::MountPoint::Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
+            Specified(mp) |
+            Default(mp) => Ok(mp),
+            DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
+            Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
         }
     }
 
@@ -217,10 +212,11 @@ impl App {
         }
 
         let install_dir = self.get_mountpoint_dir(&metadata)?;
+        let install_dir_full = install_dir.full_path()?;
 
         // create the mount point dir if it doesn't exist
-        if !install_dir.exists() {
-            std::fs::create_dir_all(&install_dir)?;
+        if !install_dir_full.exists() {
+            std::fs::create_dir_all(&install_dir_full)?;
         }
 
         // get the list of files and their hashes from the meta file
@@ -245,13 +241,13 @@ impl App {
 
             let mut entry = entry?;
 
-            let installed_ok = entry.unpack_in(&install_dir)?;
+            let installed_ok = entry.unpack_in(&install_dir_full)?;
 
             let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
 
             pbar.set_message(String::from(path.as_str()));
 
-            let installed_path = join_path_utf8!(&install_dir, &path);
+            let installed_path = join_path_utf8!(&install_dir_full, &path);
 
             // store the mtime
             if let Some(info) = metadata.files.get_mut(&path) {
@@ -274,7 +270,7 @@ impl App {
         pbar.finish_and_clear();
 
         let mut details = db::DbPkg::new(metadata);
-        details.location = install_dir.into();
+        details.location = Some(install_dir);
         details.versioning = versioning;
         details.package_file_filename = Some(package_file_filename.to_string());
 
@@ -440,7 +436,7 @@ impl App {
         if let Some(current) = &current_install {
             let version_same = current.metadata.version == version.as_str();
 
-            let pinning_same = current.versioning.same_as(&versioning);
+            let pinning_same = current.versioning == versioning;
 
             if version_same {
                 if !reinstall {
@@ -547,7 +543,8 @@ impl App {
         let mut old_files = current_pkg_info.metadata.files.clone();
 
         let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
-        tracing::trace!("installing to the same location {}", location);
+        let location_full = location.full_path()?;
+        tracing::trace!("installing to the same location {:?}", location);
 
         let bars = indicatif::MultiProgress::new();
 
@@ -569,10 +566,11 @@ impl App {
         let delete_thread = std::thread::spawn({
             let current_pkg_info = current_pkg_info.clone();
             let bars = bars.clone();
+            let location_full = location_full.clone();
             move || {
 
                 let iter = remove_files.iter().map(|(path, info)| {
-                    let path = build_pkg_file_path(&current_pkg_info, &path).unwrap();
+                    let path = join_path_utf8!(&location_full, &path);
                     (path, info)
                 });
 
@@ -607,6 +605,7 @@ impl App {
 
             for _ in 0..diff_threads {
                 let location = &location;
+                let location_full = &location_full;
                 let new_files = &new_files;
                 let skip_files = &skip_files;
                 let recv = recv.clone();
@@ -618,7 +617,7 @@ impl App {
                     // read a path from the channel
                     while let Ok((path, info)) = recv.recv() {
 
-                        let fullpath = join_path_utf8!(location, &path);
+                        let fullpath = join_path_utf8!(location_full, &path);
 
                         let file_state = get_filestate(&fullpath);
 
@@ -681,7 +680,7 @@ impl App {
 
         // wait for deletes to be finished before starting unpacks,
         // there could be conflicting file types
-        if let Err(_) = delete_thread.join() {
+        if delete_thread.join().is_err() {
             anyhow::bail!("Error in file deletion thread");
         }
 
@@ -709,7 +708,7 @@ impl App {
             } else {
                 tracing::debug!("updating   {}", path);
                 update_bar.set_message(String::from(path.as_str()));
-                let _ok = entry.unpack_in(&location);
+                let _ok = entry.unpack_in(&location_full);
                 //TODO handle error
                 update_bar.inc(1);
             }
@@ -899,9 +898,11 @@ impl App {
             let mut restore_files = HashSet::new();
 
             let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
+            let root_dir_full = root_dir.full_path()?;
+
             for (filepath, fileinfo) in pkg.metadata.files.iter() {
 
-                let path = join_path_utf8!(&root_dir, filepath);
+                let path = join_path_utf8!(&root_dir_full, filepath);
                 //println!("{}", path);
 
                 if fileinfo.volatile && !restore_volatile {
@@ -1023,10 +1024,16 @@ impl App {
                 let mut zstd = zstd::Decoder::new(&mut data_file)?;
                 let mut data_tar = tar::Archive::new(&mut zstd);
 
+                // if the install location is missing, try to create it
+                let location_full = pkg.location.as_ref().context("package has no install location")?.full_path()?;
+                if !location_full.exists() {
+                    create_dir(&location_full).context("failed to create missing directory")?;
+                }
+
                 for ent in data_tar.entries()? {
                     let mut ent = ent.context("error reading tar")?;
                     let path = Utf8PathBuf::from(&ent.path()?.to_string_lossy());
-                    let full_path = build_pkg_file_path(pkg, &path)?;
+                    let full_path = join_path_utf8!(&location_full, &path);
                     if let Some(xpath) = restore_files.take(&path) {
                         let _ok = ent.unpack(full_path);
                         //dbg!(_ok);
@@ -1113,9 +1120,10 @@ impl App {
     fn delete_package_files(&self, pkg: &db::DbPkg, verbose: bool, remove_unowned: bool) -> AResult<()> {
 
         let location = pkg.location.as_ref().context("package has no install location")?;
+        let location_full = location.full_path()?;
 
         let iter = pkg.metadata.files.iter().map(|(path, info)| {
-            let path = join_path_utf8!(&location, path);
+            let path = join_path_utf8!(&location_full, path);
             (path, info)
         });
 
@@ -1158,7 +1166,11 @@ impl App {
         self.load_db()?;
         for pkg in &self.db.installed {
 
-            if let Some(pkg_loc) = pkg.location.as_ref().and_then(|p| p.canonicalize_utf8().ok()) {
+            let pkg_loc = pkg.location.as_ref()
+                .and_then(|p| p.full_path().ok())
+                .and_then(|p| p.canonicalize_utf8().ok());
+
+            if let Some(pkg_loc) = pkg_loc {
                 //println!("checking package {}", &pkg.metadata.name);
                 //println!("install location: {}", pkg_loc);
                 if needle.starts_with(&pkg_loc) {
@@ -1207,8 +1219,7 @@ impl App {
         for pkg in &self.db.installed {
             if pkg.metadata.name == pkg_name {
 
-                let root = pkg.location.as_ref().expect("package doesn't have an install location");
-                let root = root.canonicalize_utf8()?;
+                let root = pkg.location.as_ref().expect("package doesn't have an install location").full_path()?.canonicalize_utf8()?;
 
                 for (path, info) in &pkg.metadata.files {
                     if depth > 0 {
@@ -1319,8 +1330,7 @@ impl App {
             .into_iter()
             .skip(1)      // skip the root dir
             .flatten()    // skip error entries
-            .map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
-            .flatten()
+            .filter_map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
         {
             if let Some(filename) = path.file_name() {
                 let mut remove = false;
@@ -1682,15 +1692,6 @@ impl App {
 
 } // impl App
 
-/// Build a full filepath from a relative path from a package file.
-fn build_pkg_file_path<T: AsRef<str>>(pkg: &db::DbPkg, path: &T) -> AResult<Utf8PathBuf> {
-    let mut fullpath = Utf8PathBuf::from(pkg.location.as_ref().context("package has no install location")?);
-    fullpath.push(path.as_ref());
-    Ok(fullpath)
-
-    //note: return Ok(fullpath.canonicalize()?) // can't canonicalize because that resolves symlinks
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
+//fn path_to_string(path: &Path) -> String {
+//    path.to_string_lossy().to_string()
+//}

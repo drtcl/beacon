@@ -25,7 +25,8 @@ pub struct FileInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DbPkg {
-    pub location: Option<FilePath>,
+    //pub location: Option<FilePath>,
+    pub location: Option<config::PathType>,
 
     /// Which channel was used to install this package, if any.
     /// Pinned to a specific version?
@@ -127,6 +128,7 @@ impl Db {
 
             serde_json::from_reader(&mut std::io::Cursor::new(&contents))?
         };
+        //dbg!(&db);
         Ok(db)
     }
 

@@ -28,6 +28,7 @@ use version::Version;
 
 use crate::app::*;
 
+/// Ensure that a dir path exists. Create dirs as needed.
 fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
     let path = path.as_ref();
 
