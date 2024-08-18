@@ -179,8 +179,13 @@ pub fn get_cli() -> Command {
                         .arg(arg!(-d --duration <time> "When to expire, time fom now."))
                 )
                 .subcommand(
+                    Command::new("clean")
+                        .about("Clean expired cache entries")
+                )
+                .subcommand(
                     Command::new("clear")
-                        .about("Clear the cache") //TODO explain
+                        .about("Clear the cache")
+                        .arg(arg!(--"in-use" "Allow evicting package files that are currently in use"))
                 )
                 .subcommand(
                     Command::new("evict")

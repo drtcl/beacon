@@ -133,7 +133,7 @@ pub struct CacheToml {
     retention: String,
 
     #[serde(default = "bool::default")]
-    auto_clear: bool,
+    auto_clean: bool,
 }
 
 impl Config {

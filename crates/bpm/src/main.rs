@@ -141,8 +141,12 @@ fn main() -> AResult<()> {
     match matches.subcommand() {
         Some(("cache", sub_matches)) => {
             match sub_matches.subcommand() {
-                Some(("clear", _matches)) => {
-                    app.cache_clear()?;
+                Some(("clean", _matches)) => {
+                    app.cache_clean()?;
+                },
+                Some(("clear", matches)) => {
+                    let in_use = matches.get_flag("in-use");
+                    app.cache_clear(in_use)?;
                 },
                 Some(("evict", matches)) => {
                     let pkg = matches.get_one::<String>("pkg").unwrap();

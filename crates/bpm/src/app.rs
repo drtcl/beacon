@@ -890,6 +890,8 @@ impl App {
 
         // TODO could put progress bars in here
 
+        let mut new_cache_files = Vec::new();
+
         for pkg in db_iter {
 
             let mut pristine = true;
@@ -1013,6 +1015,11 @@ impl App {
                     name: pkg.metadata.name.clone(),
                     version: pkg.metadata.version.clone(),
                 }).context("could not find package file")?;
+
+                if let Some(filename) = path.file_name() {
+                    new_cache_files.push(filename.to_owned());
+                }
+
                 let cache_file = std::fs::File::open(path).context("reading cached package file")?;
 
                 // TODO potential to get a different package here
@@ -1049,6 +1056,12 @@ impl App {
                 println!("> {} -- RESTORED", pkg.metadata.name);
             }
         }
+
+        for filename in new_cache_files {
+            self.db.cache_touch(&filename, None);
+            self.db.cache_set_in_use(&filename, true);
+        }
+        self.save_db()?;
 
         Ok(())
     }
@@ -1312,8 +1325,8 @@ impl App {
         Ok(())
     }
 
-    /// `bpm cache clear`
-    pub fn cache_clear(&mut self) -> AResult<()> {
+    /// `bpm cache clean`
+    pub fn cache_clean(&mut self) -> AResult<()> {
 
         let retention = self.config.cache_retention;
 
@@ -1358,16 +1371,58 @@ impl App {
                     }
                 }
 
-                tracing::trace!(touch=?touch, in_use=in_use, "cache {} {}", tern!(remove, "remove", "keep"), filename);
+                tracing::trace!(touch=?touch, in_use=in_use, "cache clean - {} {}", tern!(remove, "remove", "keep"), filename);
 
                 if remove {
-                    let pkg_path = join_path!(&pkg_dir, &filename);
-                    let ok = std::fs::remove_file(&pkg_path);
+                    let ok = std::fs::remove_file(&path);
                     if let Err(e) = ok {
-                        eprintln!("failed to remove {}: {}", pkg_path.display(), e);
+                        eprintln!("failed to remove {}: {}", path, e);
+                    } else {
+                        self.db.cache_files.retain(|e| e.filename != filename);
                     }
+                }
+            }
+        }
 
-                    self.db.cache_files.retain(|e| e.filename != filename);
+        self.save_db()?;
+        Ok(())
+    }
+
+    /// `bpm cache clear`
+    pub fn cache_clear(&mut self, in_use: bool) -> AResult<()> {
+
+        self.load_db()?;
+
+        // gather a list of package files in the cache
+        let pkg_dir = join_path!(&self.config.cache_dir, "packages");
+
+        for path in walkdir::WalkDir::new(&pkg_dir)
+            .max_depth(1) // package files are a flat list at the root dir
+            .into_iter()
+            .skip(1)      // skip the root dir
+            .flatten()    // skip error entries
+            .filter_map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
+        {
+            if let Some(filename) = path.file_name() {
+                let mut remove = true;
+
+                match self.db.cache_files.iter().find(|e| e.filename == filename) {
+                    None => { }
+                    Some(ent) => {
+                        if ent.in_use && !in_use {
+                            remove = false;
+                        }
+                    }
+                }
+
+                if remove {
+                    tracing::trace!("cache clear - remove {}", filename);
+                    let ok = std::fs::remove_file(&path);
+                    if let Err(e) = ok {
+                        eprintln!("failed to remove {}: {}", path, e);
+                    } else {
+                        self.db.cache_files.retain(|e| e.filename != filename);
+                    }
                 }
             }
         }
