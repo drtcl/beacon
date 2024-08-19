@@ -79,6 +79,10 @@ pub struct FileInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtime: Option<u64>,
 
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+
     pub volatile: bool,
 }
 
@@ -141,7 +145,7 @@ pub struct MetaData {
 struct FileInfoString(String);
 // strings look like this:
 // d
-// f:hash:mtime
+// f:hash:mtime:size
 // s:link_to:hash
 
 /// FileInfo -> FileInfoString
@@ -183,10 +187,17 @@ impl From<&FileInfo> for FileInfoString {
         }
 
         // mtime
+        ret.push(':');
         if info.filetype.is_file() {
             if let Some(mtime) = info.mtime {
-                ret.push_str(&format!(":{mtime}"))
+                ret.push_str(&format!("{mtime}"))
             }
+        }
+
+        // size
+        ret.push(':');
+        if let Some(size) = info.size {
+            ret.push_str(&format!("{size}"))
         }
 
         // trim any trailing :
@@ -198,6 +209,7 @@ impl From<&FileInfo> for FileInfoString {
     }
 }
 
+/// FileInfoString > FileInfo
 impl TryFrom<FileInfoString> for FileInfo {
     type Error = String;
     fn try_from(s: FileInfoString) -> Result<Self, Self::Error> {
@@ -224,16 +236,6 @@ impl TryFrom<FileInfoString> for FileInfo {
             }
         }
 
-//        let ft = iter.next();
-//        let ft = match ft {
-//            Some(FILE_ATTR) => Some(FileType::File),
-//            Some(DIR_ATTR) => Some(FileType::Dir),
-//            Some(SYMLINK_ATTR) => {
-//                let to = iter.next().map(str::to_owned);
-//                to.map(FileType::Link)
-//            }
-//            Some(_) | None => None,
-//        };
         if ft.is_none() {
             return Err(s);
         }
@@ -244,12 +246,14 @@ impl TryFrom<FileInfoString> for FileInfo {
         }
 
         let mtime = iter.next().and_then(|v| v.parse::<u64>().ok());
+        let size = iter.next().and_then(|v| v.parse::<u64>().ok());
 
         let ret = Self {
             filetype: ft.unwrap(),
             hash,
             mtime,
             volatile,
+            size,
         };
 
         Ok(ret)
@@ -351,9 +355,12 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         " {spinner:.green} verifying package"
     ).unwrap());
 
-    let metadata = get_metadata(pkg_file).context("error reading package metadata")?;
-
-    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
+    // it can take a while to parse the file list for large packages, do that in a separate thread
+    // while we move on to hashing the package
+    let metadata = read_metadata(pkg_file).context("error reading package metadata")?;
+    let meta_thread = std::thread::spawn(move || -> Result<MetaData> {
+        MetaData::from_reader(&mut std::io::Cursor::new(&metadata))
+    });
 
     pkg_file.rewind()?;
     let computed_sum = {
@@ -368,10 +375,14 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
 
         blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
     };
+
+    let metadata = meta_thread.join().unwrap()?; // unwrapping an error is only possible on a panic
+
+    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
     let matches = &computed_sum == described_sum;
     tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
 
-    pbar.finish_and_clear();
+    //pbar.finish_and_clear();
 
     if !matches {
         tracing::error!("package file data hash mismatch {} != {}", computed_sum, described_sum);
@@ -384,7 +395,9 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
     pkg_file.rewind()?;
     {
 
-        let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
+        pbar.set_position(0);
+        pbar.set_length(meta_filelist.len() as u64);
+        //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
         pbar.set_style(indicatif::ProgressStyle::with_template(
             " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
         ).unwrap());
@@ -394,7 +407,6 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         let zstd = zstd::Decoder::new(data_tar_zst)?;
         let mut tar = tar::Archive::new(zstd);
         for ent in tar.entries()? {
-            pbar.inc(1);
             let ent = ent?;
             let path = ent.path()?;
             let path = path.to_string_lossy().to_string();
@@ -404,6 +416,7 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
                 return Ok((false, metadata));
             }
             // TODO also check that the file type matches
+            pbar.inc(1);
         }
 
         pbar.finish_and_clear();
@@ -419,6 +432,15 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
     tracing::trace!("package passes integrity check");
 
     Ok((true, metadata))
+}
+
+pub fn read_metadata(pkg_file: &mut File) -> Result<Vec<u8>> {
+    pkg_file.rewind()?;
+    let mut tar = tar::Archive::new(pkg_file);
+    let (mut meta, _size) = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
+    let mut contents = Vec::new();
+    meta.read_to_end(&mut contents)?;
+    Ok(contents)
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {

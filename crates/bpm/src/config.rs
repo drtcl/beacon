@@ -1,12 +1,33 @@
 use anyhow::Context;
+use camino::Utf8PathBuf;
 use crate::AResult;
 use crate::provider::Provider;
-use serde_derive::Deserialize;
-use std::io::Read;
-use std::path::Path;
-use camino::Utf8PathBuf;
+use serde::{Serialize, Deserialize};
+use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::io::Read;
+use std::path::Path;
+use std::sync::OnceLock;
+
+static CONFIG_PATH: OnceLock<Utf8PathBuf> = OnceLock::new();
+
+pub fn store_config_path(path: Utf8PathBuf) {
+    CONFIG_PATH.get_or_init(|| path);
+}
+
+pub fn get_config_path() -> Option<&'static Utf8PathBuf> {
+    CONFIG_PATH.get()
+}
+
+pub fn get_config_dir() -> Option<&'static camino::Utf8Path> {
+    if let Some(path) = get_config_path() {
+        path.parent()
+    } else {
+        None
+    }
+}
 
 /// the main config struct
 #[derive(Debug)]
@@ -20,28 +41,89 @@ pub struct Config {
 
 #[derive(Debug)]
 pub struct MountConfig {
-    pub use_default_target: bool,
-    pub default_target: Option<Utf8PathBuf>,
-    pub mounts: Vec<(String, Utf8PathBuf)>,
+
+    /// name of default mount
+    pub default_target: Option<String>,
+
+    /// [name, path]
+    pub mounts: Vec<(String, PathType)>,
 }
 
 #[derive(Debug)]
 pub enum MountPoint {
-    Specified(Utf8PathBuf),
-    Default(Utf8PathBuf),
+    Specified(PathType),
+    Default(PathType),
     DefaultDisabled,
     Invalid {
         name: String,
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RelativeToAnchor {
+    Bpm,
+    Config,
+}
+
+impl RelativeToAnchor {
+    pub fn path(&self) -> Option<Utf8PathBuf> {
+        match self {
+            Self::Bpm => {
+                std::env::current_exe()
+                    .map(|p| p.parent().map(Path::to_path_buf))
+                    .ok()
+                    .flatten()
+                    .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
+
+            },
+            Self::Config => {
+                get_config_dir().map(ToOwned::to_owned)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PathType {
+    Relative{
+        path: Utf8PathBuf,
+        relative_to: RelativeToAnchor,
+    },
+    #[serde(untagged)]
+    Absolute(Utf8PathBuf),
+}
+
+impl PathType {
+    pub fn full_path(&self) -> anyhow::Result<Utf8PathBuf> {
+        match self {
+            Self::Relative{path, relative_to} => {
+                if let Some(rel) = relative_to.path() {
+                    Ok(crate::join_path_utf8!(rel, path))
+                } else {
+                    anyhow::bail!("No relative path anchor")
+                }
+            }
+            Self::Absolute(path) => Ok(path.to_owned())
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ConfigToml {
     database: String,
-    use_default_target: bool,
     providers: toml::value::Table,
-    mount: toml::value::Table,
+    mount: HashMap<String, MountToml>,
     cache: CacheToml,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MountToml {
+    JustPath(String),
+    Table {
+        default: bool,
+        path: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,7 +133,7 @@ pub struct CacheToml {
     retention: String,
 
     #[serde(default = "bool::default")]
-    auto_clear: bool,
+    auto_clean: bool,
 }
 
 impl Config {
@@ -64,45 +146,41 @@ impl Config {
             toml::from_str::<ConfigToml>(&contents).context("failed to parse config")?
         };
 
-        let cache_dir = Utf8PathBuf::from(path_replace(toml.cache.dir));
-        let db_file = Utf8PathBuf::from(path_replace(toml.database));
+        let cache_dir = path_replace(toml.cache.dir)?.full_path()?;
+        let db_file = path_replace(toml.database)?.full_path()?;
         let cache_retention = humantime::parse_duration(&toml.cache.retention).context("invalid cache retention")?;
 
         let mut mounts = Vec::new();
-        for mount in toml.mount.into_iter() {
-            match mount {
-                (name, toml::Value::String(ref val)) => {
-                    let path = Utf8PathBuf::from(path_replace(val));
-                    if !path.exists() {
-                        eprintln!("warning: mount '{}', path '{}' does not exist", name, path);
-                    } else {
-                        //let canon = path.canonicalize().expect("failed to canonicalize path");
-                        //println!("canon {:?}", canon);
-                    }
-                    mounts.push((name, path));
-                },
-                (name, _) => {
-                    return Err(anyhow::anyhow!("invalid mount {}", name));
-                }
-            }
-        }
+        let mut default_target = None;
+        for (name, mount) in toml.mount {
 
-        let mut mount = MountConfig {
-            use_default_target: toml.use_default_target,
-            default_target: None,
-            mounts,
-        };
-        // extract the TARGET mount if it was defined
-        if let Some(idx) = mount.mounts.iter().position(|e| e.0 == "TARGET") {
-            let (_name, path) = mount.mounts.remove(idx);
-            mount.default_target = Some(path);
+            let (path, is_default) = match mount {
+                MountToml::JustPath(path) => (path, false),
+                MountToml::Table { default, path } => (path, default),
+            };
+
+            let path = path_replace(path)?;
+
+            if is_default {
+                if default_target.is_some() {
+                    anyhow::bail!("mutliple default mount points");
+                }
+                default_target = Some(name.clone());
+            }
+
+            let full_path = path.full_path()?;
+            if !full_path.exists() {
+                eprintln!("warning: mount '{}', path '{}' does not exist", name, full_path);
+            }
+
+            mounts.push((name, path));
         }
 
         let mut providers: Vec<Provider> = Vec::new();
         for p in toml.providers.into_iter() {
             match p {
                 (name, toml::Value::String(ref uri)) => {
-                    let uri = path_replace(uri);
+                    let uri = provider_replace(uri)?;
                     let provider = Provider::new(name, uri, &cache_dir)?;
                     providers.push(provider);
                 }
@@ -113,7 +191,7 @@ impl Config {
                             return Err(anyhow::anyhow!("invalid provider {}", name));
                         }
                         let uri = uri.unwrap();
-                        let uri = path_replace(uri);
+                        let uri = provider_replace(uri)?;
                         let provider = Provider::new(name.clone(), uri, &cache_dir)?;
                         providers.push(provider);
                     }
@@ -126,10 +204,13 @@ impl Config {
 
         let config = Config {
             cache_dir,
+            cache_retention,
             db_file,
             providers,
-            mount,
-            cache_retention,
+            mount : MountConfig {
+                default_target,
+                mounts,
+            },
         };
 
         //dbg!(&config);
@@ -142,60 +223,92 @@ impl Config {
         Self::from_reader(read)
     }
 
+    /// Given a name (from a package definition) find
+    /// and return the mount point from the config
     pub fn get_mountpoint(&self, name: Option<&str>) -> MountPoint {
         match name {
             None => {
-                if !self.mount.use_default_target {
-                    MountPoint::DefaultDisabled
-                } else {
-                    match &self.mount.default_target {
-                        Some(path) => MountPoint::Default(path.clone()),
-                        None => MountPoint::Invalid{ name: "TARGET".into() },
-                    }
-                }
-            },
-            Some(name) => {
-                if name == "TARGET" {
-                    if !self.mount.use_default_target {
-                        MountPoint::DefaultDisabled
-                    } else {
-                        match &self.mount.default_target {
-                            Some(path) => MountPoint::Specified(path.clone()),
-                            None => MountPoint::Invalid{ name: "TARGET".into() },
-                        }
-                    }
-                } else {
+                if let Some(name) = &self.mount.default_target {
                     for (n, path) in &self.mount.mounts {
                         if name == n {
-                            return MountPoint::Specified(path.clone());
+                            return MountPoint::Default(path.clone());
                         }
                     }
-                    MountPoint::Invalid{name: name.to_string()}
                 }
+                MountPoint::DefaultDisabled
+            },
+            Some(name) => {
+                for (n, path) in &self.mount.mounts {
+                    if name == n {
+                        return MountPoint::Specified(path.clone());
+                    }
+                }
+                MountPoint::Invalid{name: name.to_string()}
             }
         }
     }
 }
 
 /// replace variables within a path
-/// - `${BPM}` => dir of bpm binary
-/// - `${THIS}` => dir of the config file
-/// - `${OS}` => "linux", "windows", "wasm", "unix", "unknown"
-/// - `${ARCH3264}` => "64" or "32"
-/// - `${ARCHX8664}` => "x86" or "x86_64"
-fn path_replace<S: Into<String>>(path: S) -> String {
+/// - `${BPM}` => dir of bpm binary, must be at the start of the path
+/// - `${THIS}` => dir of the config file, must be at the start of the path
+/// - and anything replaced by config_replace()
+fn path_replace<S: Into<String>>(path: S) -> anyhow::Result<PathType> {
 
-    let mut path = path.into();
+    let mut path : String = path.into();
+    let mut relative = None;
 
-    if path.contains("${BPM}") {
+    // ${BPM} must be the first thing in the string
+    if path.starts_with("${BPM}/") {
         let cur_exe = std::env::current_exe().expect("failed to get current exe path");
-        let exe_dir = cur_exe.parent().unwrap().to_str().unwrap();
-        path = path.replace("${BPM}", exe_dir);
+        let exe_dir = Utf8PathBuf::from(cur_exe.parent().unwrap().to_str().context("invalid path, not utf8")?);
+        path = path.strip_prefix("${BPM}/").unwrap().into();
+        relative = Some(RelativeToAnchor::Bpm);
     }
 
-    //if path.contains("${THIS}") {
-        //todo!("NYI");
-    //}
+    if path.contains("${BPM}") {
+        // more ${BPM} found in the middle of the path
+        anyhow::bail!("Invalid ${{BPM}} substitution: '{path}'");
+    }
+
+    // ${THIS} must be the first thing in the string
+    if path.starts_with("${THIS}/") {
+        if let Some(dir) = get_config_dir() && dir.is_absolute() {
+            path = path.strip_prefix("${THIS}/").unwrap().into();
+            relative = Some(RelativeToAnchor::Config);
+        } else {
+            anyhow::bail!("Cannot substitute ${{THIS}} when config path is unknown");
+        }
+    }
+
+    if path.contains("${THIS}") {
+        // more ${THIS} found in the middle of the path
+        anyhow::bail!("Invalid ${{THIS}} substitution: '{path}'");
+    }
+
+    config_replace(&mut path);
+
+    let path = Utf8PathBuf::from(path);
+    if relative.is_none() && path.is_relative() {
+        anyhow::bail!("Invalid naked relative path '{path}' in config file");
+    }
+
+    if let Some(relative) = relative {
+        Ok(PathType::Relative{
+            path,
+            relative_to: relative,
+        })
+    } else {
+        Ok(PathType::Absolute(path))
+    }
+}
+
+/// replace variables within a path
+/// - `${OS}` => "linux", "windows", "darwin", "wasm", "unix", "unknown"
+/// - `${ARCH3264}` => "64" or "32"
+/// - `${POINTER_WIDTH}` => "64" or "32"
+/// - `${ARCHX8664}` => "x86" or "x86_64"
+fn config_replace(path: &mut String) {
 
     if path.contains("${OS}") {
 
@@ -203,15 +316,17 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             "windows"
         } else if cfg!(target_os="linux") {
             "linux"
-        } else if cfg!(unix) {
-            "unix"
+        } else if cfg!(target_os="macos") {
+            "darwin"
         } else if cfg!(target_family="wasm") {
             "wasm"
+        } else if cfg!(unix) {
+            "unix"
         } else {
             "unknown"
         };
 
-        path = path.replace("${OS}", os);
+        *path = path.replace("${OS}", os);
     }
 
     if path.contains("${ARCH3264}") {
@@ -224,7 +339,7 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             panic!("unhandled architecture");
         };
 
-        path = path.replace("${ARCH3264}", arch);
+        *path = path.replace("${ARCH3264}", arch);
     }
 
     if path.contains("${POINTER_WIDTH}") {
@@ -234,10 +349,10 @@ fn path_replace<S: Into<String>>(path: S) -> String {
         } else if cfg!(target_pointer_width="64") {
             "64"
         } else {
-            panic!("unhandled architecture");
+            panic!("unhandled pointer width (not 32 or 64)");
         };
 
-        path = path.replace("${POINTER_WIDTH}", arch);
+        *path = path.replace("${POINTER_WIDTH}", arch);
     }
 
     if path.contains("${ARCHX8664}") {
@@ -254,10 +369,29 @@ fn path_replace<S: Into<String>>(path: S) -> String {
             panic!("unhandled architecture");
         };
 
-        path = path.replace("${ARCHX8664}", arch);
+        *path = path.replace("${ARCHX8664}", arch);
     }
+}
 
-    path
+fn provider_replace(uri: &str) -> anyhow::Result<String> {
 
-    //PathBuf::from(path)
+    if uri.starts_with("file://") {
+
+        let path = uri.strip_prefix("file://").unwrap();
+        let path = path_replace(path)?.full_path()?;
+        return Ok(format!("file://{path}"));
+
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+
+        let mut uri = String::from(uri);
+        config_replace(&mut uri);
+        return Ok(uri);
+
+    } else {
+
+        eprintln!("warning: unrecognized provider type");
+        let mut uri = String::from(uri);
+        config_replace(&mut uri);
+        return Ok(uri);
+    }
 }

@@ -28,6 +28,7 @@ use version::Version;
 
 use crate::app::*;
 
+/// Ensure that a dir path exists. Create dirs as needed.
 fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
     let path = path.as_ref();
 
@@ -60,10 +61,12 @@ fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
 /// 2.     config.toml next to the executable
 /// 3. bpm_config.toml in user's config dir
 /// 4. bpm_config.toml in any parent dir from executable
-fn find_config_file() -> AResult<PathBuf> {
+fn find_config_file() -> AResult<Utf8PathBuf> {
+
+    let cur_exe = Utf8PathBuf::from_path_buf(std::env::current_exe()?).map_err(|_| anyhow::anyhow!("invalid path, not utf8"))?;
 
     // bpm_config.toml next to executable
-    let mut path = std::env::current_exe()?.with_file_name("bpm_config.toml");
+    let mut path = cur_exe.with_file_name("bpm_config.toml");
     if path.is_file() {
         return Ok(path);
     }
@@ -79,6 +82,7 @@ fn find_config_file() -> AResult<PathBuf> {
         let config_dir = base.config_local_dir();
         let path = config_dir.join("bpm_config.toml");
         if path.is_file() {
+            let path = Utf8PathBuf::from_path_buf(path).map_err(|_| anyhow::anyhow!("invalid path, not utf8"))?;
             return Ok(path);
         }
     }
@@ -88,6 +92,7 @@ fn find_config_file() -> AResult<PathBuf> {
     for dir in path.ancestors().skip(1) {
         let path = dir.join("bpm_config.toml");
         if path.is_file() {
+            let path = Utf8PathBuf::from_path_buf(path).map_err(|_| anyhow::anyhow!("invalid path, not utf8"))?;
             return Ok(path);
         }
     }
@@ -121,10 +126,11 @@ fn main() -> AResult<()> {
 
     // find the config file
     let config_file = matches.get_one::<String>("config");
-    let config_file = config_file.map_or_else(find_config_file, |s| Ok(PathBuf::from(s)))?;
-    tracing::trace!("using config file {}", config_file.display());
+    let config_file = config_file.map_or_else(find_config_file, |s| Ok(Utf8PathBuf::from(s)))?;
+    tracing::trace!("using config file {}", config_file);
 
     // load the config file
+    config::store_config_path(config_file.canonicalize_utf8().context("failed to canonicalize config path")?);
     let mut app = App {
         config: config::Config::from_path(config_file).context("reading config file")?,
         db: db::Db::new(),
@@ -135,8 +141,12 @@ fn main() -> AResult<()> {
     match matches.subcommand() {
         Some(("cache", sub_matches)) => {
             match sub_matches.subcommand() {
-                Some(("clear", _matches)) => {
-                    app.cache_clear()?;
+                Some(("clean", _matches)) => {
+                    app.cache_clean()?;
+                },
+                Some(("clear", matches)) => {
+                    let in_use = matches.get_flag("in-use");
+                    app.cache_clear(in_use)?;
                 },
                 Some(("evict", matches)) => {
                     let pkg = matches.get_one::<String>("pkg").unwrap();

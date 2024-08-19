@@ -1,14 +1,13 @@
 database = "${BPM}/../../crates/bpm/db.json"
-use_default_target = true
 
 [cache]
 dir = "${BPM}/../../crates/bpm/cache"
-retention = "14 days"
+retention = "10mins"
 
 [mount]
-TARGET = "${BPM}/../../crates/bpm/install/target"
-TEST  = "${BPM}/../../crates/bpm/install/test"
+TARGET = { default = true, path = "${THIS}/crates/bpm/install/target" }
+TEST  = "${THIS}/crates/bpm/install/test"
 
 [providers]
 test1 = "http://localhost:8000/pkg/"
-test2 = "fs://${BPM}/../../crates/bpmpack/pkg/"
+test2 = "file://${THIS}/crates/bpmpack/pkg/"

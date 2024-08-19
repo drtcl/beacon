@@ -1,16 +1,16 @@
-use crate::*;
-use std::io::BufWriter;
-use std::io::IsTerminal;
+use bpmutil::*;
 use chrono::SubsecRound;
+use crate::*;
 use itertools::Itertools;
 use package::PackageID;
-use std::fs::File;
-use std::io::Seek;
-use std::io::Read;
-use std::collections::HashSet;
+use serde::{Serialize, Deserialize};
 use std::collections::BTreeMap;
-
-use bpmutil::*;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::IsTerminal;
+use std::io::Read;
+use std::io::Seek;
 
 mod list;
 
@@ -23,7 +23,7 @@ pub struct App {
     pub provider_filter: provider::ProviderFilter,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Versioning {
     pub pinned_to_version: bool,
     pub pinned_to_channel: bool,
@@ -161,14 +161,14 @@ impl App {
         Ok(merged_results)
     }
 
-    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<Utf8PathBuf> {
-        let pkg_mount_point = metadata.mount.as_deref();
-        let mount_point = self.config.get_mountpoint(pkg_mount_point);
+    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<config::PathType> {
+        use config::MountPoint::*;
+        let mount_point = self.config.get_mountpoint(metadata.mount.as_deref());
         match mount_point {
-            config::MountPoint::Specified(mp) |
-            config::MountPoint::Default(mp) => Ok(mp),
-            config::MountPoint::DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
-            config::MountPoint::Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
+            Specified(mp) |
+            Default(mp) => Ok(mp),
+            DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
+            Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
         }
     }
 
@@ -212,10 +212,11 @@ impl App {
         }
 
         let install_dir = self.get_mountpoint_dir(&metadata)?;
+        let install_dir_full = install_dir.full_path()?;
 
         // create the mount point dir if it doesn't exist
-        if !install_dir.exists() {
-            std::fs::create_dir_all(&install_dir)?;
+        if !install_dir_full.exists() {
+            std::fs::create_dir_all(&install_dir_full)?;
         }
 
         // get the list of files and their hashes from the meta file
@@ -240,13 +241,13 @@ impl App {
 
             let mut entry = entry?;
 
-            let installed_ok = entry.unpack_in(&install_dir)?;
+            let installed_ok = entry.unpack_in(&install_dir_full)?;
 
             let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
 
             pbar.set_message(String::from(path.as_str()));
 
-            let installed_path = join_path_utf8!(&install_dir, &path);
+            let installed_path = join_path_utf8!(&install_dir_full, &path);
 
             // store the mtime
             if let Some(info) = metadata.files.get_mut(&path) {
@@ -269,7 +270,7 @@ impl App {
         pbar.finish_and_clear();
 
         let mut details = db::DbPkg::new(metadata);
-        details.location = install_dir.into();
+        details.location = Some(install_dir);
         details.versioning = versioning;
         details.package_file_filename = Some(package_file_filename.to_string());
 
@@ -377,7 +378,9 @@ impl App {
 
     /// `bpm install`
     ///
-    /// `bpm install foo` or `bpm install foo@1.2.3` or `bpm install path/to/foo_1.2.3.bpm`
+    /// `bpm install foo`
+    /// or `bpm install foo@1.2.3`
+    /// or `bpm install path/to/foo_1.2.3.bpm`
     /// install a package from a provider or directly from a file
     pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool, reinstall: bool) -> AResult<()> {
 
@@ -433,16 +436,35 @@ impl App {
         if let Some(current) = &current_install {
             let version_same = current.metadata.version == version.as_str();
 
+            let pinning_same = current.versioning == versioning;
+
             if version_same {
                 if !reinstall {
-                    println!("No change. Package {} at version {} is already intalled", pkg_name, version);
+
+                    println!("No change. Package {} at version {} is already installed.", pkg_name, version);
+
+                    // may not need to update because versions are the same,
+                    // but may be updating from specific version to a channel or from a channel to
+                    // a version (changing the pinning). Update pinning info.
+                    if !pinning_same && update {
+                        self.db.set_versioning(pkg_name, versioning.clone());
+                        self.save_db()?;
+                        if versioning.pinned_to_channel {
+                            println!("Updated pin to channel {}.", versioning.channel.as_deref().unwrap_or("?"));
+                        } else if versioning.pinned_to_version {
+                            println!("Updated pin to version {}.", version.as_str());
+                        } else {
+                            println!("Update pinning, no longer pinned to a version or channel");
+                        }
+                    }
+
                     return Ok(());
                 }
             } else if !update {
                 println!("Package {} ({}) is already installed. Pass --update to install a different version.", pkg_name, current.metadata.version);
                 return Ok(());
             } else {
-                println!("Updating {} from verson {} to {}", pkg_name, current.metadata.version, version);
+                println!("Updating {} from version {} to {}", pkg_name, current.metadata.version, version);
             }
         }
 
@@ -506,19 +528,25 @@ impl App {
         let mut new_package_fd = std::fs::File::open(cache_file)?;
 
         //// make sure the checksum matches
-        let (ok, metadata) = package::package_integrity_check(&mut new_package_fd)?;
+        let (ok, new_metadata) = package::package_integrity_check(&mut new_package_fd)?;
         if !ok {
             anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
         } else {
             tracing::trace!("package integrity check pass");
         }
 
-        let new_files = metadata.files.clone();
+        let new_files = new_metadata.files.clone();
         //dbg!(&new_files.keys());
 
         // gather info about the old package (the currently installed version)
-        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently intalled")?;
+        let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently installed")?;
         let mut old_files = current_pkg_info.metadata.files.clone();
+
+        let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
+        let location_full = location.full_path()?;
+        tracing::trace!("installing to the same location {:?}", location);
+
+        let bars = indicatif::MultiProgress::new();
 
         // old_files -= new_files
         for (path, new_file) in &new_files {
@@ -535,49 +563,135 @@ impl App {
         // these are the files to remove
         let remove_files = old_files;
 
-        let iter = remove_files.iter().map(|(path, info)| {
-            let path = build_pkg_file_path(current_pkg_info, &path).unwrap();
-            (path, info)
-        });
+        let delete_thread = std::thread::spawn({
+            let current_pkg_info = current_pkg_info.clone();
+            let bars = bars.clone();
+            let location_full = location_full.clone();
+            move || {
 
-        let delete_ok = Self::delete_files(iter, false, false);
-        if let Err(e) = delete_ok {
-            eprintln!("error deleting files {:?}", e);
-        }
+                let iter = remove_files.iter().map(|(path, info)| {
+                    let path = join_path_utf8!(&location_full, &path);
+                    (path, info)
+                });
 
-        let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
-        tracing::trace!("installing to the same location {}", location);
+                let delete_bar = bars.add(indicatif::ProgressBar::new(remove_files.len() as u64));
+                delete_bar.set_style(indicatif::ProgressStyle::with_template(
+                    " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
+                ).unwrap());
 
-        let mut skip_files = HashSet::new();
+                let iter = delete_bar.wrap_iter(iter).with_finish(indicatif::ProgressFinish::AndClear);
 
-        for (path, info) in &new_files {
-            // if already exists, check hash
-            let fullpath = join_path_utf8!(&location, &path);
-            if let Ok(true) = fullpath.try_exists() {
-
-                if info.filetype.is_file() {
-                    tracing::trace!("getting hash for {}", fullpath);
-                    let mut file = File::open(&fullpath).context("opening file for reading")?;
-                    let hash = blake3_hash_reader(&mut file).context("blake3 hashing")?;
-
-                    if Some(&hash) == info.hash.as_ref() {
-                        // this file can be skipped during update
-                        skip_files.insert(path);
-                    } else {
-                        // overwrite this file
-                        tracing::trace!("hash mismatch {} != {}, re-install", &hash, info.hash.as_ref().unwrap());
-                    }
+                let delete_ok = Self::delete_files(iter, false, true);
+                if let Err(e) = delete_ok {
+                    eprintln!("error deleting files {:?}", e);
                 }
             }
+        });
+
+        let diff_bar = indicatif::ProgressBar::new(new_files.len() as u64);
+        diff_bar.set_style(indicatif::ProgressStyle::with_template(
+            " {spinner:.green} diffing  {wide_bar:.blue} {pos}/{len} "
+        ).unwrap());
+        let diff_bar = bars.add(diff_bar);
+
+        let skip_files = std::sync::Mutex::new(HashSet::<Utf8PathBuf>::new());
+
+        // spawn threads for hashing/diffing existing files
+        std::thread::scope(|s| {
+
+            let (send, recv) = crossbeam::channel::bounded::<(&Utf8PathBuf, &package::FileInfo)>(256);
+
+            let diff_threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1).clamp(1, 8);
+
+            for _ in 0..diff_threads {
+                let location = &location;
+                let location_full = &location_full;
+                let new_files = &new_files;
+                let skip_files = &skip_files;
+                let recv = recv.clone();
+                let diff_bar = diff_bar.clone();
+                s.spawn(move || {
+
+                    let mut t_skip_files = HashSet::<Utf8PathBuf>::new();
+
+                    // read a path from the channel
+                    while let Ok((path, info)) = recv.recv() {
+
+                        let fullpath = join_path_utf8!(location_full, &path);
+
+                        let file_state = get_filestate(&fullpath);
+
+                        // if the file path exists in the filesystem, it's a regular file and the
+                        // new file is a regular file. We can potentially skip replacing this file,
+                        // check if the current file's contents match the incoming file.
+                        if !file_state.missing && file_state.file && info.filetype.is_file() {
+
+                            // hash the file as a last resort
+                            let mut do_hash = true;
+
+                            // if the file is a different size, it needs replacing
+                            if let Some(new_size) = info.size {
+                                let cur_size = get_filesize(fullpath.as_str());
+                                if let Ok(cur_size) = cur_size && cur_size != new_size {
+                                    do_hash = false;
+                                }
+                            }
+
+                            if do_hash {
+                                // if the file has a different mtime, just replace it
+                                if let Some(mtime) = info.mtime {
+                                    if let Some(cur_mtime) = file_state.mtime && cur_mtime != mtime {
+                                        do_hash = false;
+                                    }
+                                }
+                            }
+
+                            if do_hash {
+                                if let Some(new_hash) = info.hash.as_ref() {
+                                    if let Ok(mut file) = File::open(&fullpath) {
+                                        if let Ok(hash) = blake3_hash_reader(&mut file) {
+                                            if &hash == new_hash {
+                                                // this file can be skipped during update
+                                                t_skip_files.insert(path.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        diff_bar.inc(1);
+                    }
+
+                    // merge this threads t_skip_files into the main skip_files
+                    skip_files.lock().unwrap().extend(t_skip_files);
+                });
+            }
+
+            for (path, info) in new_files.iter() {
+                let _ = send.send((path, info));
+            }
+            drop(send);
+        });
+
+        diff_bar.finish_and_clear();
+
+        let mut skip_files = skip_files.into_inner()?;
+
+        // wait for deletes to be finished before starting unpacks,
+        // there could be conflicting file types
+        if delete_thread.join().is_err() {
+            anyhow::bail!("Error in file deletion thread");
         }
 
-        //dbg!(&skip_files);
+        let update_bar = bars.add(indicatif::ProgressBar::new((new_files.len() - skip_files.len()) as u64));
+        //let update_bar = bars.add(indicatif::ProgressBar::new(new_files.len() as u64));
+        //update_bar.set_position(skip_files.len() as u64);
 
-        let pbar = indicatif::ProgressBar::new(new_files.len() as u64);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            "   {msg}\n {spinner:.green} {wide_bar:.green} {pos}/{len} "
+        update_bar.set_style(indicatif::ProgressStyle::with_template(
+            "   {msg}\n {spinner:.green} updating {wide_bar:.green} {pos}/{len} "
         ).unwrap());
-        pbar.set_prefix(metadata.name.to_string());
+        update_bar.set_prefix(new_metadata.name.to_string());
 
         new_package_fd.rewind()?;
         let mut outer_tar = tar::Archive::new(&mut new_package_fd);
@@ -589,20 +703,20 @@ impl App {
             let mut entry = entry?;
             let path = entry.path()?;
             let path = Utf8PathBuf::from(&path.to_string_lossy());
-            pbar.set_message(String::from(path.as_str()));
             if skip_files.remove(&path) {
                 tracing::trace!("skipping   {}", path);
             } else {
-                tracing::trace!("updating   {}", path);
-                let _ok = entry.unpack_in(&location);
+                tracing::debug!("updating   {}", path);
+                update_bar.set_message(String::from(path.as_str()));
+                let _ok = entry.unpack_in(&location_full);
                 //TODO handle error
+                update_bar.inc(1);
             }
-            pbar.inc(1);
         }
 
-        pbar.finish_and_clear();
+        update_bar.finish_and_clear();
 
-        let mut details = db::DbPkg::new(metadata);
+        let mut details = db::DbPkg::new(new_metadata);
         details.location = Some(location);
         details.versioning = versioning;
         let pkg_filename = new_pkg_file.file_name().map(str::to_string);
@@ -659,9 +773,14 @@ impl App {
             let result = self.find_package_version(&pkg.metadata.name, channel.as_deref());
 
             if let Ok((listing, versioning)) = result {
-                //dbg!(&listing);
-                //dbg!(&versioning);
                 let version = listing.version;
+
+                // if the version is the same as already installed, skip the update
+                if version == Version::from(pkg.metadata.version.as_str()) {
+                    //println!("{} already up-to-date", pkg.metadata.name);
+                    continue;
+                }
+
                 //println!("{}: updating to {}", pkg.metadata.name, version);
 
                 let cached_file = self.cache_package_require(&PackageID{
@@ -680,9 +799,13 @@ impl App {
             }
         }
 
-        println!("updates:");
-        for (name, oldv, newv, _versioning, _pkgfile) in &updates {
-            println!("{}: {} -> {}", name, oldv, newv);
+        if !updates.is_empty() {
+            println!("{} package{} to update:", updates.len(), tern!(updates.len() > 1, "s", ""));
+            for (name, oldv, newv, _versioning, _pkgfile) in &updates {
+                println!("  {}: {} -> {}", name, oldv, newv);
+            }
+        } else {
+            println!("No updates to apply");
         }
 
         //TODO can put confirmation prompt here
@@ -767,6 +890,8 @@ impl App {
 
         // TODO could put progress bars in here
 
+        let mut new_cache_files = Vec::new();
+
         for pkg in db_iter {
 
             let mut pristine = true;
@@ -775,9 +900,11 @@ impl App {
             let mut restore_files = HashSet::new();
 
             let root_dir = pkg.location.as_ref().expect("package has no installation location").clone();
+            let root_dir_full = root_dir.full_path()?;
+
             for (filepath, fileinfo) in pkg.metadata.files.iter() {
 
-                let path = join_path_utf8!(&root_dir, filepath);
+                let path = join_path_utf8!(&root_dir_full, filepath);
                 //println!("{}", path);
 
                 if fileinfo.volatile && !restore_volatile {
@@ -888,6 +1015,11 @@ impl App {
                     name: pkg.metadata.name.clone(),
                     version: pkg.metadata.version.clone(),
                 }).context("could not find package file")?;
+
+                if let Some(filename) = path.file_name() {
+                    new_cache_files.push(filename.to_owned());
+                }
+
                 let cache_file = std::fs::File::open(path).context("reading cached package file")?;
 
                 // TODO potential to get a different package here
@@ -899,10 +1031,16 @@ impl App {
                 let mut zstd = zstd::Decoder::new(&mut data_file)?;
                 let mut data_tar = tar::Archive::new(&mut zstd);
 
+                // if the install location is missing, try to create it
+                let location_full = pkg.location.as_ref().context("package has no install location")?.full_path()?;
+                if !location_full.exists() {
+                    create_dir(&location_full).context("failed to create missing directory")?;
+                }
+
                 for ent in data_tar.entries()? {
                     let mut ent = ent.context("error reading tar")?;
                     let path = Utf8PathBuf::from(&ent.path()?.to_string_lossy());
-                    let full_path = build_pkg_file_path(pkg, &path)?;
+                    let full_path = join_path_utf8!(&location_full, &path);
                     if let Some(xpath) = restore_files.take(&path) {
                         let _ok = ent.unpack(full_path);
                         //dbg!(_ok);
@@ -919,9 +1057,17 @@ impl App {
             }
         }
 
+        for filename in new_cache_files {
+            self.db.cache_touch(&filename, None);
+            self.db.cache_set_in_use(&filename, true);
+        }
+        self.save_db()?;
+
         Ok(())
     }
 
+    /// Iterate a collection of files and delete them.
+    /// Delete symlinks and regular files first, then delete all directories afterward.
     fn delete_files<'a, I, P>(files: I, verbose: bool, remove_unowned: bool) -> AResult<()>
         where
             P : std::fmt::Debug + AsRef<Utf8Path>,
@@ -938,6 +1084,7 @@ impl App {
             match &fileinfo.filetype {
                 package::FileType::Link(to) => {
                     vout!(verbose, "delete {filepath} -> {to}");
+                    tracing::trace!("delete  {filepath}");
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
                         eprintln!("error deleting {filepath}: {e}");
@@ -945,6 +1092,7 @@ impl App {
                 }
                 package::FileType::File => {
                     vout!(verbose, "delete {filepath}");
+                    tracing::trace!("delete  {filepath}");
                     let e = std::fs::remove_file(filepath);
                     if let Err(e) = e && exists {
                         eprintln!("error deleting {filepath}: {e}");
@@ -959,6 +1107,7 @@ impl App {
         dirs.reverse();
         for path in dirs {
             vout!(verbose, "delete {path}");
+            tracing::trace!("delete  {path}");
 
             let exists = matches!(path.try_exists(), Ok(true));
             let e = if remove_unowned {
@@ -984,9 +1133,10 @@ impl App {
     fn delete_package_files(&self, pkg: &db::DbPkg, verbose: bool, remove_unowned: bool) -> AResult<()> {
 
         let location = pkg.location.as_ref().context("package has no install location")?;
+        let location_full = location.full_path()?;
 
         let iter = pkg.metadata.files.iter().map(|(path, info)| {
-            let path = join_path_utf8!(&location, path);
+            let path = join_path_utf8!(&location_full, path);
             (path, info)
         });
 
@@ -1029,7 +1179,11 @@ impl App {
         self.load_db()?;
         for pkg in &self.db.installed {
 
-            if let Some(pkg_loc) = pkg.location.as_ref().and_then(|p| p.canonicalize_utf8().ok()) {
+            let pkg_loc = pkg.location.as_ref()
+                .and_then(|p| p.full_path().ok())
+                .and_then(|p| p.canonicalize_utf8().ok());
+
+            if let Some(pkg_loc) = pkg_loc {
                 //println!("checking package {}", &pkg.metadata.name);
                 //println!("install location: {}", pkg_loc);
                 if needle.starts_with(&pkg_loc) {
@@ -1078,8 +1232,7 @@ impl App {
         for pkg in &self.db.installed {
             if pkg.metadata.name == pkg_name {
 
-                let root = pkg.location.as_ref().expect("package doesn't have an install location");
-                let root = root.canonicalize_utf8()?;
+                let root = pkg.location.as_ref().expect("package doesn't have an install location").full_path()?.canonicalize_utf8()?;
 
                 for (path, info) in &pkg.metadata.files {
                     if depth > 0 {
@@ -1172,8 +1325,8 @@ impl App {
         Ok(())
     }
 
-    /// `bpm cache clear`
-    pub fn cache_clear(&mut self) -> AResult<()> {
+    /// `bpm cache clean`
+    pub fn cache_clean(&mut self) -> AResult<()> {
 
         let retention = self.config.cache_retention;
 
@@ -1190,8 +1343,7 @@ impl App {
             .into_iter()
             .skip(1)      // skip the root dir
             .flatten()    // skip error entries
-            .map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
-            .flatten()
+            .filter_map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
         {
             if let Some(filename) = path.file_name() {
                 let mut remove = false;
@@ -1219,16 +1371,58 @@ impl App {
                     }
                 }
 
-                tracing::trace!(touch=?touch, in_use=in_use, "cache {} {}", tern!(remove, "remove", "keep"), filename);
+                tracing::trace!(touch=?touch, in_use=in_use, "cache clean - {} {}", tern!(remove, "remove", "keep"), filename);
 
                 if remove {
-                    let pkg_path = join_path!(&pkg_dir, &filename);
-                    let ok = std::fs::remove_file(&pkg_path);
+                    let ok = std::fs::remove_file(&path);
                     if let Err(e) = ok {
-                        eprintln!("failed to remove {}: {}", pkg_path.display(), e);
+                        eprintln!("failed to remove {}: {}", path, e);
+                    } else {
+                        self.db.cache_files.retain(|e| e.filename != filename);
                     }
+                }
+            }
+        }
 
-                    self.db.cache_files.retain(|e| e.filename != filename);
+        self.save_db()?;
+        Ok(())
+    }
+
+    /// `bpm cache clear`
+    pub fn cache_clear(&mut self, in_use: bool) -> AResult<()> {
+
+        self.load_db()?;
+
+        // gather a list of package files in the cache
+        let pkg_dir = join_path!(&self.config.cache_dir, "packages");
+
+        for path in walkdir::WalkDir::new(&pkg_dir)
+            .max_depth(1) // package files are a flat list at the root dir
+            .into_iter()
+            .skip(1)      // skip the root dir
+            .flatten()    // skip error entries
+            .filter_map(|entry| Utf8Path::from_path(entry.path()).map(Utf8Path::to_path_buf))
+        {
+            if let Some(filename) = path.file_name() {
+                let mut remove = true;
+
+                match self.db.cache_files.iter().find(|e| e.filename == filename) {
+                    None => { }
+                    Some(ent) => {
+                        if ent.in_use && !in_use {
+                            remove = false;
+                        }
+                    }
+                }
+
+                if remove {
+                    tracing::trace!("cache clear - remove {}", filename);
+                    let ok = std::fs::remove_file(&path);
+                    if let Err(e) = ok {
+                        eprintln!("failed to remove {}: {}", path, e);
+                    } else {
+                        self.db.cache_files.retain(|e| e.filename != filename);
+                    }
                 }
             }
         }
@@ -1351,9 +1545,18 @@ impl App {
     }
 
     /// `bpm cache fetch name@version`
+    /// or
+    /// `bpm cache fetch /path/to/packagefile`
     pub fn cache_fetch(&mut self, mut pkg_name: &str) -> AResult<()> {
 
         tracing::trace!("cache fetch {}", pkg_name);
+
+        if let Some((path, name, v)) = Self::is_package_file_arg(pkg_name) {
+            tracing::trace!("cache fetch directly from file {}", path);
+            self.cache_store_file(&path)?;
+            let _ = self.cache_touch(name, Some(v.to_string()).as_ref(), None);
+            return Ok(());
+        }
 
         let mut split = pkg_name.split('@');
 
@@ -1498,10 +1701,7 @@ impl App {
 
             pbar.finish_and_clear();
 
-            // TODO
-            // validate the package
-            //let x = package::package_integrity_check_path(&cache_path);
-            //dbg!(&x);
+            // TODO could validate the package here, and remove it if it fails
         }
 
         Ok(cache_path)
@@ -1547,15 +1747,6 @@ impl App {
 
 } // impl App
 
-/// Build a full filepath from a relative path from a package file.
-fn build_pkg_file_path<T: AsRef<str>>(pkg: &db::DbPkg, path: &T) -> AResult<Utf8PathBuf> {
-    let mut fullpath = Utf8PathBuf::from(pkg.location.as_ref().context("package has no install location")?);
-    fullpath.push(path.as_ref());
-    Ok(fullpath)
-
-    //note: return Ok(fullpath.canonicalize()?) // can't canonicalize because that resolves symlinks
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
+//fn path_to_string(path: &Path) -> String {
+//    path.to_string_lossy().to_string()
+//}
