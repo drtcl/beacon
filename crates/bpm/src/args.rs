@@ -133,10 +133,17 @@ pub fn get_cli() -> Command {
                    //      //.action(ArgAction::Append)
                    // )
                 )
+                .subcommand(Command::new("kv").about("Query a package's Key-Value store")
+                    .arg(arg!(<pkg> "Which package to query"))
+                    .arg(arg!(--key [key] "Show only a single key's value"))
+                    .after_help("With no additional args, the entire KV will be dumped in json format")
+                )
                 // other ideas:
                 // which provider it came from
                 // mount
                 // file sizes
+                // hash
+                // uuid
                 // risked (files in owned dirs, that are not owned files)
         )
         .subcommand(

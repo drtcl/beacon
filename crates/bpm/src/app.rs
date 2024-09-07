@@ -1252,6 +1252,31 @@ impl App {
         anyhow::bail!("package not installed")
     }
 
+    /// `bpm query kv`
+    pub fn query_kv(&mut self, pkg_name: &str, key: Option<&str>) -> AResult<()> {
+
+        self.load_db()?;
+        for pkg in &self.db.installed {
+            if pkg.metadata.name == pkg_name {
+                match key {
+                    Some(key) => {
+                        if let Some(value) = pkg.metadata.kv.get(key) {
+                            println!("{}", value);
+                        } else {
+                            anyhow::bail!("key not found");
+                        }
+                    }
+                    None => {
+                        //println!("{:?}", pkg.metadata.kv);
+                        println!("{}", serde_json::to_string_pretty(&pkg.metadata.kv)?);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// `bpm scan`
     pub fn scan_cmd(&self, debounce: std::time::Duration) -> AResult<()> {
 

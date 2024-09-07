@@ -271,6 +271,12 @@ fn main() -> AResult<()> {
                     let absolute  = sub_matches.get_flag("absolute");
                     app.query_files(pkg, depth.copied(), absolute, show_type)?;
                 }
+                Some(("kv", sub_matches)) => {
+                    let pkg = sub_matches.get_one::<String>("pkg").unwrap();
+                    let key = sub_matches.get_one::<String>("key").map(|s| s.as_str());
+                    //println!("query kv {pkg}");
+                    app.query_kv(pkg, key)?;
+                }
                 _ => {
                     unreachable!();
                 }
