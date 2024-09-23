@@ -1,12 +1,8 @@
-//#![allow(dead_code)]
-//#![allow(unused_variables)]
-
 //#![feature(extract_if)]
-#![feature(let_chains)]
+//#![feature(let_chains)]
 
 use anyhow::Result;
 use camino::Utf8PathBuf;
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::trace;
@@ -14,69 +10,13 @@ use version::VersionString;
 
 const CHANNEL_DIR_PREFIX : &str = "channel_";
 const CHANNELS_FILE : &str = "channels.json";
+const KV_FILE : &str = "kv.json";
 
-type FilePath = String;
-type PackageName = String;
 type PackageVersion = VersionString;
-type PackagefileName = String;
 type ChannelName = String;
 
 // ChannelName -> [Version]
 type ChannelList = HashMap<ChannelName, Vec<PackageVersion>>;
-
-#[derive(Debug)]
-pub struct VersionInfo {
-    pub url: FilePath,
-    pub filename: PackagefileName,
-    pub channels: Vec<String>,
-}
-
-type VersionList = BTreeMap<PackageVersion, VersionInfo>;
-type PackageList = BTreeMap<PackageName, VersionList>;
-
-#[derive(Debug)]
-struct Report {
-    packages: PackageList,
-}
-
-impl Report {
-    fn new() -> Self {
-        Self {
-            packages: PackageList::new(),
-        }
-    }
-
-    fn add_version(&mut self, pkg_name: &str, version: &str, info: VersionInfo) {
-
-        let version = VersionString::from(version);
-
-        let versions = self.packages.entry(pkg_name.to_string())
-            .or_default();
-
-        match versions.get_mut(&version) {
-            None => {
-                versions.insert(version, info);
-            }
-            Some(ref mut entry) => {
-                for channel in info.channels {
-                    if !entry.channels.iter().any(|c| c == &channel) {
-                        entry.channels.push(channel.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    fn add_channel_version(&mut self, pkg_name: &str, channel: &str, version: &str) {
-        if let Some(vmap) = self.packages.get_mut(pkg_name) {
-            if let Some(info) = vmap.get_mut(&VersionString::from(version)) {
-                if !info.channels.iter().any(|v| v == channel) {
-                    info.channels.push(channel.to_string());
-                }
-            }
-        }
-    }
-}
 
 /// Scan a directory for packages
 /// Accepted directory structures:
@@ -93,29 +33,33 @@ impl Report {
 ///             foo-1.0.0.bpm
 ///             foo-2.0.0.bpm
 ///             channels.json      (optional)
+///             kv.json            (optional)
 ///             channel_stable/    (optional)
 ///                 foo-3.0.0.bpm
 ///         bar/
 ///             bar-0.1.0.bpm
 /// ```
-pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
+pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::ScanResult> {
 
     trace!(filter_name, dir=?dir, "full_scan");
 
-    let mut report = Report::new();
+    let mut report = scan_result::ScanResult::default();
+
     let mut overrides = ignore::overrides::OverrideBuilder::new(dir);
 
     if let Some(filter_name) = filter_name {
         overrides
             .add(&format!("/{}*.bpm", filter_name))?
             .add(&format!("/{}/{}*.bpm", filter_name, filter_name))?
-            .add(&format!("/{}/channels.json", filter_name))?
+            .add(&format!("/{}/{}", filter_name, CHANNELS_FILE))?
+            .add(&format!("/{}/{}", filter_name, KV_FILE))?
             .add(&format!("/{}/channel_*/{}*.bpm", filter_name, filter_name))?;
     } else {
         overrides
             .add("/*.bpm").unwrap()
             .add("/*/*.bpm").unwrap()
-            .add("/*/channels.json").unwrap()
+            .add(&format!("/*/{}", CHANNELS_FILE)).unwrap()
+            .add(&format!("/*/{}", KV_FILE)).unwrap()
             .add("/*/channel_*/*.bpm").unwrap();
     }
 
@@ -131,6 +75,7 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
         .build();
 
     let mut channels_json_files = Vec::new();
+    let mut kv_json_files = Vec::new();
 
     for entry in walker.into_iter().flatten() {
 
@@ -158,6 +103,7 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
 
         let is_valid_package_name = package::is_packagefile_name(filename);
         let is_channels_file = filename == CHANNELS_FILE;
+        let is_kv_file = filename == KV_FILE;
 
         let parent_dir_path = full_path.parent();
         let parent_dir_name = parent_dir_path.and_then(|path| path.file_name());
@@ -169,6 +115,12 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
             let pkg_name = parent_dir_name.unwrap();
             channels_json_files.push((pkg_name.to_string(), full_path.clone()));
 
+        } else if depth == 2 && is_kv_file {
+
+            // save kv files for later
+            let pkg_name = parent_dir_name.unwrap();
+            kv_json_files.push((pkg_name.to_string(), full_path.clone()));
+
         } else if let Some((pkg_name, pkg_version)) = package::split_parts(filename) {
 
             if depth == 1 && is_valid_package_name {
@@ -176,11 +128,13 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
                 // flat layout
                 // pkg/foo-1.2.3.bpm
 
-                report.add_version(pkg_name, pkg_version, VersionInfo{
-                    url: full_path.to_string(),
-                    filename: filename.to_string(),
+                let vi = scan_result::VersionInfo {
                     channels: Vec::new(),
-                });
+                    uri: full_path.to_string(),
+                    filename: filename.to_string(),
+                };
+
+                report.add_version(pkg_name, pkg_version, vi);
                 tracing::debug!("[f] found {}", rel_path);
 
             } else if depth == 2 && is_valid_package_name {
@@ -190,11 +144,13 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
                 // pkg/foo/foo-1.2.3.bpm
 
                 if parent_dir_name == Some(pkg_name) {
-                    report.add_version(pkg_name, pkg_version, VersionInfo{
-                        url: full_path.to_string(),
-                        filename: filename.to_string(),
+                    let vi = scan_result::VersionInfo {
                         channels: Vec::new(),
-                    });
+                        uri: full_path.to_string(),
+                        filename: filename.to_string(),
+                    };
+
+                    report.add_version(pkg_name, pkg_version, vi);
                     tracing::trace!("[n] found {}", rel_path);
                 } else {
                     tracing::warn!("found package in wrong dir {}", full_path);
@@ -211,11 +167,12 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
 
                 if let (Some(pkg_dir_name), Some(channel_name)) = (pkg_dir_name, channel_name) {
                     if pkg_dir_name == pkg_name {
-                        report.add_version(pkg_name, pkg_version, VersionInfo{
-                            url: full_path.to_string(),
-                            filename: filename.to_string(),
+                        let vi = scan_result::VersionInfo {
                             channels: vec![channel_name.to_string()],
-                        });
+                            uri: full_path.to_string(),
+                            filename: filename.to_string(),
+                        };
+                        report.add_version(pkg_name, pkg_version, vi);
                         tracing::trace!("[c] found {}", rel_path);
                     } else {
                         tracing::warn!("found package in wrong dir {}", full_path);
@@ -237,9 +194,22 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<PackageList> {
         }
     }
 
-    //dbg!(&report);
+    // now handle all kv files
+    // read the file contents, parse json and store the result
+    for (pkg_name, kv_path) in kv_json_files {
+        if let Ok(mut f) = std::fs::File::open(&kv_path) {
+            if let Ok(kv) = serde_json::from_reader(&mut f) {
+                report.add_kv(&pkg_name, kv);
+            } else {
+                tracing::warn!("failed to parse kv file {}", kv_path);
+            }
+        } else {
+            tracing::warn!("failed to open kv file {}", kv_path);
+        }
+    }
 
-    Ok(report.packages)
+    //dbg!(&report);
+    Ok(report)
 }
 
 fn parse_channels<P: AsRef<Path>>(path: P) -> Result<ChannelList> {

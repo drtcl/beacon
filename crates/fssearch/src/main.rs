@@ -17,10 +17,12 @@ fn main() -> Result<()> {
     let pkg_name = args.next();
 
     let packages = full_scan(Path::new(&dir), pkg_name.as_deref())?;
-    for (name, version_map) in &packages {
-        //println!("{} {:?}", name, version_map.keys());
+    for (name, pkg_info) in &packages.packages {
         println!("{}", name);
-        for (version, info) in version_map {
+        if let Some(kv) = &pkg_info.kv {
+            println!("  kv {}", serde_json::to_string_pretty(kv)?);
+        }
+        for (version, info) in &pkg_info.versions {
             print!("  {}", version);
             for chan in &info.channels {
                 print!(" {}", chan);

@@ -26,39 +26,9 @@ impl FileSystem {
     }
 }
 
-impl From<fssearch::VersionInfo> for VersionInfo {
-    fn from(value: fssearch::VersionInfo) -> Self {
-        Self {
-            url: value.url,
-            filename: value.filename,
-            channels: value.channels,
-        }
-    }
-}
-
-impl Search for FileSystem {
-    fn search(&self, needle: &str) -> AResult<PackageList> {
-        tracing::debug!(needle, root=?&self.root, "[Search] FileSystem::search");
-
-        let mut pkgs = fssearch::full_scan(&self.root, None)?;
-
-        pkgs.retain(|name, _versions| {
-            name.contains(needle)
-        });
-
-        let mut ret = PackageList::new();
-        for (name, versions) in pkgs {
-            for (version, urlfilename) in versions {
-                ret.entry(name.to_string())
-                    .or_default()
-                    .insert(version, VersionInfo::from(urlfilename));
-            }
-        }
-        Ok(ret)
-    }
-
-    fn scan(&self) -> AResult<PackageList> {
-        Ok(self.search("").ok().unwrap_or_default())
+impl scan_result::Scan for FileSystem {
+    fn scan(&self) -> anyhow::Result<scan_result::ScanResult> {
+        fssearch::full_scan(&self.root, None)
     }
 }
 
