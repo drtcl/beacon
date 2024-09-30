@@ -10,6 +10,7 @@ members = [
     "crates/hashdir",
     "crates/httpsearch",
     "crates/package",
+    "crates/scan_result",
     "crates/swiss",
     "crates/version",
     "crates/walk_example",

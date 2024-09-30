@@ -1,6 +1,6 @@
 [package]
 name = "fssearch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -12,6 +12,7 @@ name = "fssearch"
 [dependencies]
 package = { path = "../package" }
 version = { path = "../version" }
+scan_result = { path = "../scan_result" }
 
 anyhow = { workspace = true }
 camino = { workspace = true, features = ["serde1"]}

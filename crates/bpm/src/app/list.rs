@@ -64,18 +64,16 @@ impl App {
     /// list channels for a given package, or all packages
     pub fn list_channels_cmd(&mut self, needle: Option<&String>, exact: bool, json: bool) -> Result<()> {
 
-        let mut combined = search::PackageList::new();
+        let mut combined = scan_result::ScanResult::default();
         for provider in self.filtered_providers() {
             if let Ok(data) = provider.load_file() {
-                combined = search::merge_package_lists(combined, data.packages);
+                combined.merge(data.packages);
             }
         }
 
-        combined.retain(|_, versions| versions.iter().any(|(_, vi)| !vi.channels.is_empty()));
-
         // limit to package names containing the search term (or exact matches)
         if let Some(needle) = needle {
-            combined.retain(|pkg_name, _versions| {
+            combined.packages.retain(|pkg_name, _| {
                 if exact {
                     pkg_name == needle
                 } else {
@@ -84,10 +82,13 @@ impl App {
             });
         }
 
+        // remove any packages that don't have a channel at all
+        combined.packages.retain(|_pkg_name, pkg_info| pkg_info.versions.iter().any(|(_, vi)| !vi.channels.is_empty()));
+
         let mut m = BTreeMap::new();
-        for (pkg_name, versions) in combined {
+        for (pkg_name, pkg_info) in combined.packages {
             let entry = m.entry(pkg_name).or_insert(BTreeSet::new());
-            for (_version, info) in versions {
+            for (_version, info) in pkg_info.versions {
                 for channel in info.channels {
                     entry.insert(channel);
                 }
@@ -124,16 +125,16 @@ impl App {
         limit: u32
     ) -> Result<()> {
 
-        let mut combined = search::PackageList::new();
+        let mut combined = scan_result::ScanResult::default();
         for provider in self.filtered_providers() {
             if let Ok(data) = provider.load_file() {
-                combined = search::merge_package_lists(combined, data.packages);
+                combined.merge(data.packages);
             }
         }
 
         // limit to package names containing the search term (or exact matches)
         if let Some(needle) = needle {
-            combined.retain(|pkg_name, _versions| {
+            combined.packages.retain(|pkg_name, _| {
                 if exact {
                     pkg_name == needle
                 } else {
@@ -144,10 +145,10 @@ impl App {
 
         // limit to only the specified channels
         if let Some(channels) = channels {
-            combined.retain(|_pkg_name, versions| {
-                versions.retain(|version, info| {
-                    if !info.channels.is_empty() {
-                        for c in &info.channels {
+            combined.packages.retain(|_pkg_name, pkg_info| {
+                pkg_info.versions.retain(|version, vinfo| {
+                    if !vinfo.channels.is_empty() {
+                        for c in &vinfo.channels {
                             if channels.contains(&c) {
                                 return true;
                             }
@@ -155,13 +156,13 @@ impl App {
                     }
                     false
                 });
-                !versions.is_empty()
+                !pkg_info.versions.is_empty()
             });
         }
 
-        for (name, versions) in &combined {
+        for (name, pkg_info) in &combined.packages {
             let mut sorted = Vec::new();
-            versions.iter().map(|(v, i)| (version::Version::new(v), i)).collect_into(&mut sorted);
+            pkg_info.versions.iter().map(|(v, i)| (version::Version::new(v), i)).collect_into(&mut sorted);
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
             // limit to N number of versions per package

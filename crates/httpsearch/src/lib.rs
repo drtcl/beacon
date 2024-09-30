@@ -4,7 +4,6 @@
 #![feature(extract_if)]
 #![feature(let_chains)]
 
-
 #[cfg(all(feature="rustls", feature="nativessl"))]
 std::compile_error!("Use either rustls or nativessl feature, not both.");
 
@@ -20,6 +19,7 @@ pub use reqwest::blocking::Client;
 const DEFAULT_TIMEOUT: u64 = 5;
 const CHANNEL_DIR_PREFIX : &str = "channel_";
 const CHANNELS_FILE : &str = "channels.json";
+const KV_FILE : &str = "kv.json";
 
 type LinkText = String;
 type LinkUrlStr = String;
@@ -43,60 +43,18 @@ type VersionList = BTreeMap<PackageVersion, VersionInfo>;
 type PackageList = BTreeMap<PackageName, VersionList>;
 
 #[derive(Debug)]
-struct Report {
-    packages: PackageList,
-}
-
-impl Report {
-    fn new() -> Self {
-        Self {
-            packages: PackageList::new(),
-        }
-    }
-    fn add_version(&mut self, pkg_name: &str, version: &str, info: VersionInfo) {
-
-        let version = VersionString::from(version);
-
-        let vmap = self.packages.entry(pkg_name.to_string())
-            .or_default();
-
-        match vmap.get_mut(&version) {
-            None => {
-                vmap.insert(version, info);
-            }
-            Some(ref mut entry) => {
-                for channel in info.channels {
-                    if !entry.channels.iter().any(|c| c == &channel) {
-                        entry.channels.push(channel.to_string());
-                    }
-                }
-            }
-        }
-    }
-    fn add_channel_version(&mut self, pkg_name: &str, channel: &str, version: &str) {
-        if let Some(vmap) = self.packages.get_mut(pkg_name) {
-            if let Some(info) = vmap.get_mut(&VersionString::from(version)) {
-                if !info.channels.iter().any(|v| v == channel) {
-                    info.channels.push(channel.to_string());
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
 struct Link {
     text: LinkText,
     url: LinkUrlStr
 }
 
 impl Link {
-    fn version_info(&self) -> Option<(PackageVersion, VersionInfo)> {
+    fn version_info(&self) -> Option<(PackageVersion, scan_result::VersionInfo)> {
         if let Some((name, version)) = package::split_parts(&self.text) {
             return Some((
                 version.into(),
-                VersionInfo {
-                    url: self.url.clone(),
+                scan_result::VersionInfo {
+                    uri: self.url.clone(),
                     filename: self.text.clone(),
                     channels: Vec::new(),
                 }
@@ -121,6 +79,13 @@ fn is_channels_json(link: &Link) -> bool {
     // test if link is named "channels.json" and that the url ends in "/channels.json"
     link.text == CHANNELS_FILE &&
         link.url.strip_suffix(CHANNELS_FILE).and_then(|s| s.strip_suffix('/')).is_some()
+}
+
+/// return true for links to a CHANNELS_FILE file
+fn is_kv_json(link: &Link) -> bool {
+    // test if link is named "channels.json" and that the url ends in "/channels.json"
+    link.text == KV_FILE &&
+        link.url.strip_suffix(KV_FILE).and_then(|s| s.strip_suffix('/')).is_some()
 }
 
 /// remove any trailing "/" from a &str, returning a &str of the same lifetime
@@ -209,7 +174,7 @@ fn scrape_links_from(client: &Client, url: &Url) -> Result<Vec<Link>> {
 ///         bar/
 ///             bar-0.1.0.bpm
 /// ```
-pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)-> Result<PackageList> {
+pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)-> Result<scan_result::ScanResult> {
 
     let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
 
@@ -222,9 +187,9 @@ pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)->
 }
 
 /// see [full_scan]
-pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&str>) -> Result<PackageList> {
+pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&str>) -> Result<scan_result::ScanResult> {
 
-    let mut report = Report::new();
+    let mut report = scan_result::ScanResult::default();
 
     let mut root_url = std::borrow::Cow::Borrowed(root_url);
     if !root_url.ends_with('/') {
@@ -235,9 +200,6 @@ pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&st
     trace!(url=?root_url, "full_scan");
 
     let links = scrape_links_from(client, &root_url)?;
-    //let body = fetch_page(client, &root_url)?;
-    //let links = scrape_links(&body);
-    //let links = munge_links(&root_url, links);
 
     // split off any packages that are at the toplevel
     let (flat_package_links, links) = split_links(links, is_pkg_link);
@@ -284,11 +246,10 @@ pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&st
         }
     }
 
-    //dbg!(&report.packages);
-    Ok(report.packages)
+    Ok(report)
 }
 
-fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, dir_link: &Link) {
+fn scan_package_dir(client: &Client, report: &mut scan_result::ScanResult, pkg_name: &str, dir_link: &Link) {
 
     let ret = PackageList::new();
 
@@ -324,6 +285,9 @@ fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, dir_li
 
     // (3) extract link to channels.json
     let (channels_json, links) = split_links(links, is_channels_json);
+
+    // (4) extract link to channels.json
+    let (kv_json, links) = split_links(links, is_kv_json);
 
     // for each channel dir, scan for package files
     for channel in channel_dirs {
@@ -368,6 +332,17 @@ fn scan_package_dir(client: &Client, report: &mut Report, pkg_name: &str, dir_li
                     Err(_) => {
                         tracing::debug!("invalid json at {}", url.as_str());
                     }
+                }
+            }
+        }
+    }
+
+    // parse the kv.json file and save the result
+    if let Some(kv_url) = kv_json.first() {
+        if let Ok(url) = Url::parse(&kv_url.url) {
+            if let Ok(body) = fetch_page(client, &url) {
+                if let Ok(kv) = serde_json::from_str(&body) {
+                    report.add_kv(pkg_name, kv);
                 }
             }
         }

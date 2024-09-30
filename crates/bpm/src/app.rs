@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use bpmutil::*;
 use chrono::SubsecRound;
 use crate::*;
@@ -53,6 +54,71 @@ impl Versioning {
         }
     }
 }
+
+#[derive(Debug)]
+enum PkgArgType {
+    Filepath{
+        path: Utf8PathBuf,
+        name: String,
+        version: Version,
+    },
+    Unversioned(String),
+    Versioned(String, String),
+}
+
+/// check if a given user arg is a path to a pacakge file on the fs
+fn is_package_file_arg(arg: &str) -> Option<(Utf8PathBuf, &str, Version)> {
+    let path = Utf8Path::new(arg);
+    if let Ok(true) = path.try_exists() {
+        tracing::trace!(path=?path, "testing if file path looks like a package");
+        let filename = path.file_name();
+        if let Some(filename) = filename && package::is_packagefile_name(filename) {
+            if let Some((name, ver)) = package::split_parts(filename) {
+                return Some((path.into(), name, Version::new(ver)));
+            }
+        }
+    }
+    None
+}
+
+fn parse_pkg_arg(arg: &str) -> AResult<PkgArgType> {
+
+    if let Some((path, name, version)) = is_package_file_arg(arg) {
+        return Ok(PkgArgType::Filepath{
+            path,
+            name: name.into(),
+            version,
+        });
+    }
+
+    let mut split = None;
+    if arg.contains("@") {
+        split = Some(arg.split('@'));
+    } else if arg.contains('=') {
+        split = Some(arg.split('='));
+    }
+    if let Some(split) = &mut split {
+
+        let pkg_name = match split.next() {
+            Some("") | None => {
+                anyhow::bail!("empty package name");
+            }
+            Some(name) => name
+        };
+        let version = match split.next() {
+            Some("") | None => {
+                anyhow::bail!("empty verson");
+            }
+            Some(name) => name
+        };
+
+        return Ok(PkgArgType::Versioned(pkg_name.into(), version.into()));
+
+    } else {
+        return Ok(PkgArgType::Unversioned(arg.into()));
+    }
+}
+
 
 impl App {
     pub fn load_db(&mut self) -> AResult<()> {
@@ -112,12 +178,12 @@ impl App {
         let results = self.search_results(pkg_name, exact)?;
 
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
-        if std::io::stdout().is_terminal() && !results.is_empty() {
+        if std::io::stdout().is_terminal() && !results.packages.is_empty() {
             writeln!(&mut tw, "name\tversion\tdescription")?;
             writeln!(&mut tw, "----\t-------\t-----------")?;
         }
-        for (name, versions) in results.iter() {
-            let (version, _url) = versions.last_key_value().unwrap();
+        for (name, pkg_info) in results.packages.iter() {
+            let (version, _url) = pkg_info.versions.last_key_value().unwrap();
             writeln!(&mut tw, "{}\t{}", name, version)?;
         }
         tw.flush()?;
@@ -133,10 +199,10 @@ impl App {
     // -------------
 
     /// search and merge each provider's cached package info
-    fn search_results(&self, needle: &str, exact: bool) -> AResult<search::PackageList> {
+    fn search_results(&self, needle: &str, exact: bool) -> AResult<scan_result::ScanResult> {
 
-        let mut merged_results = search::PackageList::new();
         let needle_lower = needle.to_lowercase();
+        let mut merged_results = scan_result::ScanResult::default();
 
         for provider in self.filtered_providers() {
 
@@ -145,14 +211,14 @@ impl App {
 
                 let mut cached_results = data.packages;
 
-                cached_results.retain(|name, _versions| {
+                cached_results.packages.retain(|name, _versions| {
                     if exact {
                         name == needle
                     } else {
                         name.contains(needle) || name.to_lowercase().contains(&needle_lower)
                     }
                 });
-                merged_results = search::merge_package_lists(merged_results, cached_results);
+                merged_results.merge(cached_results);
             } else {
                 tracing::trace!(file=?provider.cache_file, "couldn't read cache file for provider '{}'", provider.name);
             }
@@ -313,11 +379,11 @@ impl App {
         // get search results for just this package name
         let mut results = self.search_results(pkg_name, true)?;
 
-        if results.len() != 1 {
+        if results.packages.len() != 1 {
             anyhow::bail!("could not find package '{pkg_name}'");
         }
 
-        let versions = results.iter_mut().next().unwrap().1;
+        let versions = &mut results.packages.iter_mut().next().unwrap().1.versions;
 
         // `which` could be a channel, check if it is
         let mut versioning = Versioning::default();
@@ -343,37 +409,18 @@ impl App {
             }
         }
 
-        if versions.is_empty() {
+        // return the greatest package version
+        if let Some((version, vinfo)) = versions.pop_last() {
+            return Ok((search::SingleListing {
+                pkg_name: std::rc::Rc::<str>::from(pkg_name),
+                version: version.into(),
+                filename: vinfo.filename,
+                url: vinfo.uri,
+                channels: vinfo.channels,
+            }, versioning));
+        } else {
             anyhow::bail!("no versions available for package '{pkg_name}'");
         }
-
-        {
-            // keep only the last version
-            let (version, urlfn) = versions.pop_last().unwrap();
-            versions.clear();
-            versions.insert(version, urlfn);
-        }
-
-        // take the greatest package version
-        let result = search::flatten(results);
-        let result = result.into_iter().next().unwrap();
-
-        Ok((result, versioning))
-    }
-
-    /// check if a given user arg is a path to a pacakge file on the fs
-    fn is_package_file_arg(arg: &str) -> Option<(Utf8PathBuf, &str, Version)> {
-        let path = Utf8Path::new(arg);
-        if let Ok(true) = path.try_exists() {
-            tracing::trace!(path=?path, "testing if file path looks like a package");
-            let filename = path.file_name();
-            if let Some(filename) = filename && package::is_packagefile_name(filename) {
-                if let Some((name, ver)) = package::split_parts(filename) {
-                    return Some((path.into(), name, Version::new(ver)));
-                }
-            }
-        }
-        None
     }
 
     /// `bpm install`
@@ -397,7 +444,7 @@ impl App {
         let mut file_to_cache = None;
         let pkg_name;
 
-        if let Some((path, name, v)) = Self::is_package_file_arg(pkg_name_or_filepath) {
+        if let Some((path, name, v)) = is_package_file_arg(pkg_name_or_filepath) {
 
             tracing::debug!("installing directly from file {}", path);
             version = v;
@@ -1252,6 +1299,172 @@ impl App {
         anyhow::bail!("package not installed")
     }
 
+    /// `bpm query kv`
+    pub fn query_kv(&mut self, pkg_names: Option<&[&str]>, keys: Option<&[&str]>) -> AResult<()> {
+
+        let one_pkg = pkg_names.is_some() && pkg_names.unwrap().len() == 1;
+        let one_key = keys.is_some() && keys.unwrap().len() == 1;
+        let no_filter = pkg_names.is_none();
+
+        let mut parsed = Vec::new();
+        if let Some(pkg_names) = pkg_names {
+            for pkg_name in pkg_names {
+                let x = parse_pkg_arg(pkg_name)?;
+                parsed.push((pkg_name.to_string(), x));
+            }
+        }
+
+        let read_file = |path: &Utf8Path| -> AResult<_> {
+            let mut file = File::open(path).context("failed to open package file")?;
+            let (ok, metadata) = package::package_integrity_check(&mut file)?;
+            Ok(metadata.kv)
+        };
+
+        let prune = |kv: BTreeMap<String, String>| -> _ {
+            let mut out = scan_result::Kv::new();
+            for (k, v) in kv {
+                if let Some(keys) = keys {
+                    if keys.contains(&k.as_str()) {
+                        out.insert(k, v);
+                    }
+                } else {
+                    out.insert(k, v);
+                }
+            }
+            out
+        };
+
+        let mut master = HashMap::<String, scan_result::Kv>::new();
+
+        if no_filter {
+            // querying all installed packages
+            self.load_db()?;
+            for pkg in self.db.installed.iter() {
+                let kv = prune(pkg.metadata.kv.clone());
+                master.insert(pkg.metadata.name.clone(), kv);
+            }
+        } else {
+            for (original, x) in parsed {
+
+                match x {
+                    PkgArgType::Unversioned(name) => {
+                        // check db
+                        self.load_db()?;
+                        if let Some(pkg) = self.db.installed.iter().find(|pkg| pkg.metadata.name == name) {
+                            let kv = prune(pkg.metadata.kv.clone());
+                            master.insert(original, kv);
+                        }
+                    }
+                    PkgArgType::Versioned(name, version) => {
+                        // check cache
+                        if let Some(path) = self.cache_package_lookup(&PackageID{ name, version }) {
+                            if let Ok(kv) = read_file(&path) {
+                                let kv = prune(kv);
+                                master.insert(original, kv);
+                            }
+                        } else if one_pkg {
+                            anyhow::bail!("package not cached, you may need to 'cache fetch' it first.");
+                        }
+                    }
+                    PkgArgType::Filepath { path, name, version } => {
+                        // read package file
+                        if let Ok(kv) = read_file(&path) {
+                            let kv = prune(kv);
+                            master.insert(original, kv);
+                        }
+                    }
+                }
+            }
+        }
+
+        if one_pkg && master.is_empty() {
+            anyhow::bail!("package not found");
+        }
+
+        master.retain(|pkg_name, kv| !kv.is_empty());
+        if one_pkg && one_key && master.is_empty() {
+            anyhow::bail!("key not found");
+        }
+
+        if one_pkg && let Some(item) = master.iter().next() {
+            if one_key {
+                println!("{}", item.1.iter().next().unwrap().1);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&item.1)?);
+            }
+        } else {
+            println!("{}", serde_json::to_string_pretty(&master)?);
+        }
+
+        Ok(())
+    }
+
+    /// `bpm query kv --from-provider`
+    /// Read the KV from the provider cache file.
+    pub fn query_kv_provider(&mut self, pkg_names: Option<&[&str]>, keys: Option<&[&str]>) -> AResult<()> {
+
+        let one_pkg = pkg_names.is_some() && pkg_names.unwrap().len() == 1;
+        let one_key = keys.is_some() && keys.unwrap().len() == 1;
+
+        let mut merged_results = scan_result::ScanResult::default();
+
+        for provider in self.filtered_providers() {
+
+            // load the provider's cache file and merge it's results
+            if let Ok(data) = provider.load_file() {
+
+                let mut cached_results = data.packages;
+
+                if let Some(filter_names) = pkg_names && !filter_names.is_empty() {
+                    cached_results.packages.retain(|name, _info| {
+                        filter_names.contains(&name.as_str())
+                        //filter_names.iter().any(|fname| fname.eq_ignore_ascii_case(name))
+                    });
+                }
+
+                merged_results.merge(cached_results);
+            } else {
+                tracing::trace!(file=?provider.cache_file, "couldn't read cache file for provider '{}'", provider.name);
+            }
+        }
+
+        if merged_results.packages.is_empty() {
+            anyhow::bail!("no packages found");
+        }
+
+        let mut master = HashMap::<String, scan_result::Kv>::new();
+
+        for (name, info) in merged_results.packages.into_iter() {
+            if let Some(mut kv) = info.kv {
+                if let Some(keys) = keys && !keys.is_empty() {
+                    kv.retain(|k, _v| {
+                        keys.contains(&k.as_str())
+                    });
+                }
+
+                if one_pkg {
+                    if one_key {
+                        if kv.is_empty() {
+                            anyhow::bail!("key not found");
+                        } else {
+                            println!("{}", kv.iter().next().unwrap().1);
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&kv)?);
+                    }
+                    return Ok(());
+                } else if !kv.is_empty() {
+                    master.insert(name, kv);
+                }
+            } else if one_pkg {
+                anyhow::bail!("No KV");
+            }
+        }
+
+        println!("{}", serde_json::to_string_pretty(&master)?);
+        Ok(())
+    }
+
     /// `bpm scan`
     pub fn scan_cmd(&self, debounce: std::time::Duration) -> AResult<()> {
 
@@ -1292,13 +1505,14 @@ impl App {
 
         for provider in self.filtered_providers() {
 
-            tracing::debug!("scanning {}", &provider.name);
-            let list = provider.as_provide().scan();
+            tracing::debug!("[scan] scanning {}", &provider.name);
+
+            let list = scan_result::Scan::scan(provider.as_provide());
 
             if let Ok(list) = list {
 
-                let pkg_count = list.len();
-                let ver_count : usize = list.iter().map(|p| p.1.len()).sum();
+                let pkg_count = list.packages.len();
+                let ver_count : usize = list.packages.iter().map(|pkg_info| pkg_info.1.versions.len()).sum();
                 tracing::debug!("[scan] {}: {} packages, {} versions", &provider.name, pkg_count, ver_count);
 
                 // write the package list to a cache file
@@ -1307,15 +1521,14 @@ impl App {
                     packages: list,
                 };
 
-                //let s = serde_json::to_string(&out)?;
                 let s = serde_json::to_string_pretty(&out)?;
                 let mut file = File::create(&provider.cache_file)?;
                 file.write_all(s.as_bytes())?;
             } else {
-                tracing::debug!("error while scanning {}", &provider.name);
+                tracing::warn!("error while scanning {}: {}", &provider.name, list.unwrap_err());
                 let out = provider::ProviderFile {
                     scan_time: now,
-                    packages: BTreeMap::new(),
+                    packages: Default::default(),
                 };
                 let s = serde_json::to_string_pretty(&out)?;
                 let mut file = File::create(&provider.cache_file)?;
@@ -1551,7 +1764,7 @@ impl App {
 
         tracing::trace!("cache fetch {}", pkg_name);
 
-        if let Some((path, name, v)) = Self::is_package_file_arg(pkg_name) {
+        if let Some((path, name, v)) = is_package_file_arg(pkg_name) {
             tracing::trace!("cache fetch directly from file {}", path);
             self.cache_store_file(&path)?;
             let _ = self.cache_touch(name, Some(v.to_string()).as_ref(), None);
@@ -1723,12 +1936,12 @@ impl App {
         for provider in self.filtered_providers() {
 
             if let Ok(provider::ProviderFile{packages, ..}) = provider.load_file() {
-                if let Some(versions) = packages.get(&id.name) {
-                    if let Some(x) = versions.get(&id.version.as_str().into()) {
+                if let Some(pkg_info) = packages.packages.get(&id.name) {
+                    if let Some(x) = pkg_info.versions.get(&id.version.as_str().into()) {
 
                         let final_path = join_path_utf8!(&self.config.cache_dir, "packages", &x.filename);
 
-                        let result = provider.as_provide().fetch(&mut file, id, &x.url);
+                        let result = provider.as_provide().fetch(&mut file, id, &x.uri);
                         if result.is_ok() {
                             file.sync_all()?;
                             drop(file);
@@ -1746,7 +1959,3 @@ impl App {
     }
 
 } // impl App
-
-//fn path_to_string(path: &Path) -> String {
-//    path.to_string_lossy().to_string()
-//}

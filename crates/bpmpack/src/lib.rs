@@ -45,6 +45,7 @@ use version::Version;
 pub mod args;
 
 const DEFAULT_ZSTD_LEVEL : i32 = 15;
+const PKG_FORMAT_VERSION : &str = "1.0.0";
 
 fn cwd() -> PathBuf {
     std::env::current_dir().expect("failed to get current dir")
@@ -591,6 +592,14 @@ pub fn subcmd_test_ignore(matches: &clap::ArgMatches) -> Result<()> {
     Ok(())
 }
 
+fn make_control_file() -> Result<Vec<u8>> {
+    let mut data = vec![];
+    writeln!(&mut data, "version = \"{}\"", PKG_FORMAT_VERSION)?;
+    writeln!(&mut data, "compress = \"zstd\"")?;
+    writeln!(&mut data, "hash = \"blake3\"")?;
+    Ok(data)
+}
+
 pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     let wrap_with_dir = matches.get_one::<String>("wrap-with-dir");
@@ -898,6 +907,14 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let package_file = BufWriter::with_capacity(1024 * 1024, package_file);
     let hashing_writer = HashingWriter::new(package_file, blake3::Hasher::new());
     let mut package_tar = tar::Builder::new(hashing_writer);
+
+    {
+        let data = make_control_file().context("creating control file")?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_entry_type(tar::EntryType::Regular);
+        package_tar.append_data(&mut header, "CONTROL", data.as_slice()).context("appending control file")?;
+    }
 
     // metadata file
     let mut header = tar::Header::new_gnu();

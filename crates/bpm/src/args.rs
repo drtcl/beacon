@@ -10,9 +10,8 @@ pub fn pull_many<'a>(matches: &'a clap::ArgMatches, key: &str) -> Vec<&'a String
 }
 
 pub fn parse_providers(matches: &clap::ArgMatches) -> provider::ProviderFilter {
-    //let providers = matches.get_many::<String>("providers").map(|v| v.collect::<Vec<&String>>());
     let providers = pull_many_opt(matches, "providers");
-    providers.map_or(provider::ProviderFilter::empty(), |v| provider::ProviderFilter::from_names(v))
+    providers.map_or(provider::ProviderFilter::empty(), |v| provider::ProviderFilter::from_names(v.iter()))
 }
 
 fn providers_arg() -> clap::Arg {
@@ -45,8 +44,8 @@ pub fn get_cli() -> Command {
         .subcommand(
             Command::new("list")
                 .about("List installed or available packages")
-                .subcommand(Command::new("installed").about("list currently installed packages"))
-                .subcommand(Command::new("available").about("list available packages")
+                .subcommand(Command::new("installed").about("List currently installed packages"))
+                .subcommand(Command::new("available").about("List available packages")
                     .alias("avail")
                     .arg(arg!([pkg] "package name substring"))
                     .arg(arg!(--exact  "match package name exactly"))
@@ -66,6 +65,7 @@ pub fn get_cli() -> Command {
                     )
                 )
                 .subcommand(Command::new("channels")
+                    .about("List the channels of packages")
                     .arg(arg!([pkg] "package name substring"))
                     .arg(arg!(--exact  "match package name exactly"))
                     .arg(arg!(--json "output in json lines format"))
@@ -133,10 +133,35 @@ pub fn get_cli() -> Command {
                    //      //.action(ArgAction::Append)
                    // )
                 )
+                .subcommand(Command::new("kv").about("Query a package's Key-Value store")
+                    .arg(clap::Arg::new("pkg")
+                         .required_unless_present("all")
+                         .conflicts_with("all")
+                         .num_args(1..)
+                    )
+                    .arg(clap::Arg::new("keys")
+                         .long("keys")
+                         .alias("key")
+                         .short('k')
+                         .help("Limit output to a set of keys")
+                         .value_name("a,b,c")
+                         .value_delimiter(',')
+                         .action(ArgAction::Append)
+                    )
+                    .arg(arg!(-a --all "Select (Query) all packages"))
+                    .arg(arg!(--"from-providers" [provider] "Get the KV from the provider, not a specific package version")
+                         .alias("from-provider")
+                         .require_equals(true)
+                         .default_missing_value("*")
+                    )
+                    .after_help("With no additional args, the entire KV will be dumped in json format")
+                )
                 // other ideas:
                 // which provider it came from
                 // mount
                 // file sizes
+                // hash
+                // uuid
                 // risked (files in owned dirs, that are not owned files)
         )
         .subcommand(

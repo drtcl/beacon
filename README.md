@@ -105,7 +105,7 @@ Example `bpm_config.toml`:
     [cache]
     dir = "${BPM}/cache"
     retention = "10 days"
-    auto_clear = true
+    auto_clean = true
 
     [mount]
     TARGET = "/path/to/install/dir"

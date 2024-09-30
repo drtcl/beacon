@@ -1,0 +1,15 @@
+[package]
+name = "scan_result"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+version = { "path" = "../version" }
+anyhow.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

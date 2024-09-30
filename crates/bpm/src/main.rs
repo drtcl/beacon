@@ -271,6 +271,28 @@ fn main() -> AResult<()> {
                     let absolute  = sub_matches.get_flag("absolute");
                     app.query_files(pkg, depth.copied(), absolute, show_type)?;
                 }
+                Some(("kv", sub_matches)) => {
+
+                    let names : Option<Vec<&str>> = sub_matches.get_many::<String>("pkg")
+                        .map(|v| v.collect::<Vec<&String>>())
+                        .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+                    let keys : Option<Vec<&str>> = sub_matches.get_many::<String>("keys")
+                        .map(|v| v.collect::<Vec<&String>>())
+                        .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+                    let provider = sub_matches.get_one::<String>("from-providers"); //.map(|s| s.as_str());
+                    if let Some(provider) = provider {
+                        if provider == "*" {
+                            app.provider_filter = provider::ProviderFilter::empty();
+                        } else {
+                            app.provider_filter = provider::ProviderFilter::from_names(provider.split(','));
+                        };
+                        app.query_kv_provider(names.as_deref(), keys.as_deref())?;
+                    } else {
+                        app.query_kv(names.as_deref(), keys.as_deref())?;
+                    }
+                }
                 _ => {
                     unreachable!();
                 }
