@@ -51,6 +51,7 @@ humantime = "2.1.0"
 ignore    = "0.4.22"
 indicatif = "0.17.8"
 itertools = "0.12.1"
+rand = "0.8.5"
 regex = "1.10.4"
 semver = "1.0.22"
 serde = { version = "1.0.199", features = ["derive"] }

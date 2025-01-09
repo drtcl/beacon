@@ -706,10 +706,13 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     size_bar.set_style(ProgressStyle::with_template(
         " {spinner:.green} packing files   {elapsed}/{duration}   {bytes_per_sec}   {bytes}/{total_bytes} "
     ).unwrap());
+
     count_bar.set_style(ProgressStyle::with_template(
+        #[allow(clippy::literal_string_with_formatting_args)]
         "   file {pos}/{len} {wide_bar:.green} ").unwrap()
     );
     comp_bar.set_style(ProgressStyle::with_template(
+        #[allow(clippy::literal_string_with_formatting_args)]
         "   compression  {percent}%  {bytes} / {total_bytes} {bar:25} "
     ).unwrap());
 

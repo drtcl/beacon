@@ -1,10 +1,14 @@
 #![feature(let_chains)]
 #![feature(iter_collect_into)]
 #![feature(io_error_more)]
+#![feature(extract_if)]
+#![feature(file_lock)]
 
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
+
+#![allow(unused_mut)]
 
 mod config;
 mod macros;
@@ -159,9 +163,12 @@ fn main() -> AResult<()> {
                     app.cache_list()?;
                 },
                 Some(("fetch", matches)) => {
-                    let pkg = matches.get_one::<String>("pkg").unwrap();
+
+                    let pkgs = matches.get_many::<String>("pkg")
+                        .map_or(Vec::new(), |given| given.collect());
+
                     app.provider_filter = args::parse_providers(matches);
-                    app.cache_fetch(pkg)?;
+                    app.cache_fetch(&pkgs)?;
                 },
                 Some(("touch", matches)) => {
 

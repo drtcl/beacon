@@ -17,7 +17,7 @@ pub struct Provider {
     pub name: String,
     pub uri: String,
     pub cache_file: Utf8PathBuf,
-    pub inner: Box<dyn Provide>,
+    pub inner: Box<dyn Provide + Sync + Send>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,7 +40,7 @@ impl Provider {
         const HTTP_PRE: &str = "http://";
         const HTTPS_PRE: &str = "https://";
 
-        let inner: Box<dyn Provide>;
+        let inner: Box<dyn Provide + Sync + Send>;
 
         if uri.starts_with(FILE_PRE) {
             let uri = uri.strip_prefix(FILE_PRE).unwrap();

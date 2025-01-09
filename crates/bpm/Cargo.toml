@@ -1,6 +1,6 @@
 [package]
 name = "bpm"
-version = "0.2.9-alpha"
+version = "0.2.9-alpha.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -28,6 +28,7 @@ directories = { workspace = true }
 humantime = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }
+rand = { workspace = true }
 regex = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"]}

@@ -34,6 +34,7 @@ pub fn get_config_dir() -> Option<&'static camino::Utf8Path> {
 pub struct Config {
     pub cache_dir: Utf8PathBuf,
     pub cache_retention: std::time::Duration,
+    pub cache_fetch_jobs: u8,
     pub db_file: Utf8PathBuf,
     pub providers: Vec<Provider>,
     pub mount: MountConfig,
@@ -134,6 +135,8 @@ pub struct CacheToml {
 
     #[serde(default = "bool::default")]
     auto_clean: bool,
+
+    fetch_jobs: Option<u8>,
 }
 
 impl Config {
@@ -145,10 +148,12 @@ impl Config {
             read.read_to_string(&mut contents)?;
             toml::from_str::<ConfigToml>(&contents).context("failed to parse config")?
         };
+        //dbg!(&toml);
 
         let cache_dir = path_replace(toml.cache.dir)?.full_path()?;
         let db_file = path_replace(toml.database)?.full_path()?;
         let cache_retention = humantime::parse_duration(&toml.cache.retention).context("invalid cache retention")?;
+        let cache_fetch_jobs = toml.cache.fetch_jobs.unwrap_or(1);
 
         let mut mounts = Vec::new();
         let mut default_target = None;
@@ -205,6 +210,7 @@ impl Config {
         let config = Config {
             cache_dir,
             cache_retention,
+            cache_fetch_jobs,
             db_file,
             providers,
             mount : MountConfig {

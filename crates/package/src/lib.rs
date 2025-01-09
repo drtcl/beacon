@@ -370,6 +370,7 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
 
         pbar.set_length(size);
         pbar.set_style(indicatif::ProgressStyle::with_template(
+            #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
         ).unwrap());
 
@@ -398,6 +399,7 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         pbar.set_position(0);
         pbar.set_length(meta_filelist.len() as u64);
         //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
+        #[allow(clippy::literal_string_with_formatting_args)]
         pbar.set_style(indicatif::ProgressStyle::with_template(
             " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
         ).unwrap());

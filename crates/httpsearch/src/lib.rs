@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use version::VersionString;
 
 pub use reqwest::blocking::Client;
+use anyhow::Context;
 
 const DEFAULT_TIMEOUT: u64 = 5;
 const CHANNEL_DIR_PREFIX : &str = "channel_";
@@ -106,7 +107,7 @@ fn channel_dir_to_name(dir: &str) -> Option<&str> {
 fn split_links<F>(mut links: Vec<Link>, mut f: F) -> (Vec<Link>, Vec<Link>)
     where F: FnMut(&Link) -> bool
 {
-    let excluded = links.extract_if(|v| !f(v)).collect();
+    let excluded = links.extract_if(.., |v| !f(v)).collect();
     (links, excluded)
 }
 
@@ -347,6 +348,27 @@ fn scan_package_dir(client: &Client, report: &mut scan_result::ScanResult, pkg_n
             }
         }
     }
+}
+
+pub fn get_size(timeout: Option<u64>, url: &str) -> Result<u64> {
+
+    let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
+
+    // re-usable client connection
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(timeout))
+        .build()?;
+
+    let url = Url::parse(url)?;
+
+    let resp = client.head(url).send()?;
+
+    let size = resp.headers()
+        .get("content-length")
+        .and_then(|s| s.to_str().ok())
+        .context("no content-length")?;
+
+    Ok(size.parse::<u64>()?)
 }
 
 pub fn download(timeout: Option<u64>, url: &str, write: &mut dyn std::io::Write) -> Result<u64> {

@@ -107,7 +107,7 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::Sc
 
         let parent_dir_path = full_path.parent();
         let parent_dir_name = parent_dir_path.and_then(|path| path.file_name());
-        let in_channels_dir = parent_dir_name.map_or(false, |path| path.starts_with(CHANNEL_DIR_PREFIX));
+        let in_channels_dir = parent_dir_name.is_some_and(|path| path.starts_with(CHANNEL_DIR_PREFIX));
 
         if depth == 2 && is_channels_file {
 

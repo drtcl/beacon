@@ -1,4 +1,4 @@
-use clap::{Command, arg, ArgAction};
+use clap::{Command, Arg, arg, ArgAction};
 use crate::provider;
 
 pub fn pull_many_opt<'a>(matches: &'a clap::ArgMatches, key: &str) -> Option<Vec<&'a String>> {
@@ -14,7 +14,7 @@ pub fn parse_providers(matches: &clap::ArgMatches) -> provider::ProviderFilter {
     providers.map_or(provider::ProviderFilter::empty(), |v| provider::ProviderFilter::from_names(v.iter()))
 }
 
-fn providers_arg() -> clap::Arg {
+fn providers_arg() -> Arg {
     arg!(--providers <names> "Only operate on the given list of providers (comma delimited)")
         .alias("provider")
         .value_delimiter(',')
@@ -134,12 +134,12 @@ pub fn get_cli() -> Command {
                    // )
                 )
                 .subcommand(Command::new("kv").about("Query a package's Key-Value store")
-                    .arg(clap::Arg::new("pkg")
+                    .arg(Arg::new("pkg")
                          .required_unless_present("all")
                          .conflicts_with("all")
                          .num_args(1..)
                     )
-                    .arg(clap::Arg::new("keys")
+                    .arg(Arg::new("keys")
                          .long("keys")
                          .alias("key")
                          .short('k')
@@ -181,7 +181,7 @@ pub fn get_cli() -> Command {
         //.subcommand(
         //    Command::new("info")
         //        .about("show detailed info about a package")
-        //        .arg(arg!(<pkg> "package name or path to local package file"))
+            //        .arg(arg!(<pkg> "package name or path to local package file"))
         //        .arg(arg!(--channels "list channels the given package"))
         //)
         .subcommand(
@@ -193,8 +193,8 @@ pub fn get_cli() -> Command {
                 .subcommand(
                     Command::new("fetch")
                         .about("Fetch a package and store it in the cache")
-                        .arg(arg!(<pkg> "Package name to fetch"))
                         .arg(providers_arg())
+                        .arg(arg!(<pkg>... "Package(s) to fetch"))
                 )
                 .subcommand(
                     Command::new("touch")
