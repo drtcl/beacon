@@ -14,14 +14,13 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let url = args.next().expect("expected url");
     let pkg_name = args.next();
-    let pkg_name = pkg_name.as_deref();
 
     let mut url = String::from(&url);
     if !url.starts_with("http") {
         url.insert_str(0, "http://");
     }
 
-    let packages = full_scan(None, &url, pkg_name)?;
+    let packages = full_scan(None, &url, pkg_name.as_deref())?;
     for (name, pkg_info) in &packages.packages {
         //println!("{} {:?}", name, pkg_info.keys());
         println!("{}", name);

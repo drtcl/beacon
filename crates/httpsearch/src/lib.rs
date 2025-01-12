@@ -1,21 +1,46 @@
-//#![allow(dead_code)]
-#![allow(unused_variables)]
+//! Scan an http server for packages
+//! ```ignore
+//! Accepted directory structures:
+//! 1) flat -- packages listed at root
+//!     pkg/
+//!         foo-1.0.0.bpm
+//!         foo-2.0.0.bpm
+//!         bar-0.1.0.bpm
+//!
+//! 2) organized -- packages in directories of package name (allows for adding channels)
+//!     pkg/
+//!         foo/
+//!             foo-1.0.0.bpm
+//!             foo-2.0.0.bpm
+//!             channels.json      (optional)
+//!             channel_stable/    (optional)
+//!                 foo-3.0.0.bpm
+//!         bar/
+//!             bar-0.1.0.bpm
+//! ```
+//!
+//! env vars:
+//!   BPM_HTTP_THREADS = T
+//!   BPM_HTTP_JOBS = J
+//!
+//!   T threads running J concurrent http requests
 
 #![feature(extract_if)]
-#![feature(let_chains)]
+
+pub mod masync;
 
 #[cfg(all(feature="rustls", feature="nativessl"))]
 std::compile_error!("Use either rustls or nativessl feature, not both.");
 
-use std::collections::HashMap;
+use anyhow::Context;
 use anyhow::Result;
+use reqwest::blocking::Client;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::trace;
 use url::Url;
-use std::collections::BTreeMap;
 use version::VersionString;
-
-pub use reqwest::blocking::Client;
-use anyhow::Context;
 
 const DEFAULT_TIMEOUT: u64 = 5;
 const CHANNEL_DIR_PREFIX : &str = "channel_";
@@ -25,7 +50,6 @@ const KV_FILE : &str = "kv.json";
 type LinkText = String;
 type LinkUrlStr = String;
 
-type PackageName = String;
 type PackageVersion = VersionString;
 type PackagefileName = String;
 type ChannelName = String;
@@ -33,15 +57,13 @@ type ChannelName = String;
 // ChannelName -> [Version]
 type ChannelList = HashMap<ChannelName, Vec<PackageVersion>>;
 
+
 #[derive(Debug)]
 pub struct VersionInfo {
     pub url: LinkUrlStr,
     pub filename: PackagefileName,
     pub channels: Vec<String>,
 }
-
-type VersionList = BTreeMap<PackageVersion, VersionInfo>;
-type PackageList = BTreeMap<PackageName, VersionList>;
 
 #[derive(Debug)]
 struct Link {
@@ -51,7 +73,7 @@ struct Link {
 
 impl Link {
     fn version_info(&self) -> Option<(PackageVersion, scan_result::VersionInfo)> {
-        if let Some((name, version)) = package::split_parts(&self.text) {
+        if let Some((_name, version)) = package::split_parts(&self.text) {
             return Some((
                 version.into(),
                 scan_result::VersionInfo {
@@ -84,7 +106,7 @@ fn is_channels_json(link: &Link) -> bool {
 
 /// return true for links to a CHANNELS_FILE file
 fn is_kv_json(link: &Link) -> bool {
-    // test if link is named "channels.json" and that the url ends in "/channels.json"
+    // test if link is named "kv.json" and that the url ends in "/kv.json"
     link.text == KV_FILE &&
         link.url.strip_suffix(KV_FILE).and_then(|s| s.strip_suffix('/')).is_some()
 }
@@ -109,19 +131,6 @@ fn split_links<F>(mut links: Vec<Link>, mut f: F) -> (Vec<Link>, Vec<Link>)
 {
     let excluded = links.extract_if(.., |v| !f(v)).collect();
     (links, excluded)
-}
-
-fn fetch_page(client: &Client, url: &Url) -> Result<String> {
-
-    //let head = client.head(url.as_str()).send()?;
-    //println!("head {:?}", head);
-    //println!("[head] headers {:?}", head.headers());
-
-    let resp = client.get(url.as_str()).send()?;
-    //println!("[get] headers {:?}", resp.headers());
-    let body = resp.text()?;
-    tracing::trace!(url=url.as_str(), "fetch, body size {}", body.len());
-    Ok(body)
 }
 
 /// return all links from a page
@@ -149,217 +158,44 @@ fn scrape_links(origin_url: &Url, body: &str) -> Vec<Link> {
     links
 }
 
-/// wrapper around fetch_page() and scrape_links()
-fn scrape_links_from(client: &Client, url: &Url) -> Result<Vec<Link>> {
-    let body = fetch_page(client, url)?;
-    Ok(scrape_links(url, &body))
-}
-
-/// Scan an http server for packages
-/// Accepted directory structures:
-/// ```ignore
-/// 1) flat -- packages listed at root
-///     pkg/
-///         foo-1.0.0.bpm
-///         foo-2.0.0.bpm
-///         bar-0.1.0.bpm
-///
-/// 2) organized -- packages in directories of package name (allows for adding channels)
-///     pkg/
-///         foo/
-///             foo-1.0.0.bpm
-///             foo-2.0.0.bpm
-///             channels.json      (optional)
-///             channel_stable/    (optional)
-///                 foo-3.0.0.bpm
-///         bar/
-///             bar-0.1.0.bpm
-/// ```
 pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)-> Result<scan_result::ScanResult> {
 
-    let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
+    let threads = std::env::var("BPM_HTTP_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n != 0)
+        .unwrap_or(1) as usize;
 
-    // re-usable client connection
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(timeout))
-        .build()?;
+    let jobs = std::env::var("BPM_HTTP_JOBS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n != 0)
+        .unwrap_or(1) as usize;
 
-    client_full_scan(&client, root_url, pkg_name)
-}
+    tracing::trace!("http scan with {threads} threads, {jobs} jobs");
 
-/// see [full_scan]
-pub fn client_full_scan(client: &Client, root_url: &str, filter_name: Option<&str>) -> Result<scan_result::ScanResult> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .thread_name("http-scan")
+        .enable_time()
+        .enable_io()
+        .build()
+        .unwrap();
 
-    let mut report = scan_result::ScanResult::default();
+    let semaphore = Arc::new(Semaphore::new(jobs));
 
-    let mut root_url = std::borrow::Cow::Borrowed(root_url);
-    if !root_url.ends_with('/') {
-        root_url.to_mut().push('/');
-    }
-    let root_url = Url::parse(&root_url)?;
-
-    trace!(url=?root_url, "full_scan");
-
-    let links = scrape_links_from(client, &root_url)?;
-
-    // split off any packages that are at the toplevel
-    let (flat_package_links, links) = split_links(links, is_pkg_link);
-
-    for link in flat_package_links {
-        tracing::debug!("found at toplevel: {}", &link.text);
-        if let Some((pkg_name, version)) = package::split_parts(&link.text) {
-            if let Some((_version, info)) = link.version_info() {
-
-                let mut add = true;
-
-                if let Some(filter_name) = filter_name {
-                    if filter_name != pkg_name {
-                        add = false;
-                    }
-                }
-
-                if add {
-                    report.add_version(pkg_name, version, info);
-                }
-            }
-        }
-    }
-
-    // scan again, but only scan items that don't have a '.' in the name, as
-    // package names cannot contain a '.' and the ones that look like a
-    // directory (have a trailing slash)
-    // i.e. scan just directories that are package names
-    let (pkg_dir_links, _) = split_links(links, |link| {
-        !link.text.contains('.') && link.url.ends_with('/')
-    });
-
-    for link in pkg_dir_links {
-        let pkg_name = strip_slash(&link.text);
-        let mut scan = true;
-        if let Some(filter_name) = filter_name {
-            if filter_name != pkg_name {
-                scan = false;
-            }
-        }
-
-        if scan {
-            scan_package_dir(client, &mut report, pkg_name, &link);
-        }
-    }
-
-    Ok(report)
-}
-
-fn scan_package_dir(client: &Client, report: &mut scan_result::ScanResult, pkg_name: &str, dir_link: &Link) {
-
-    let ret = PackageList::new();
-
-    trace!(url=dir_link.url, "scanning package dir {}", pkg_name);
-
-    // gather all links from this package dir
-    let mut links = Vec::new();
-    if let Ok(url) = Url::parse(&dir_link.url) {
-        match scrape_links_from(client, &url) {
-            Ok(l) => { links = l; },
-            Err(_) => { return; }
-        }
-    }
-
-    // (1) extract links to package files
-    let (pkg_files, links) = split_links(links, is_pkg_link);
-
-    // add all found packages to the report
-    for pkg_link in pkg_files {
-        if let Some((name, version)) = package::split_parts(&pkg_link.text) {
-            if name != pkg_name {
-                // this file doesn't belong in this dir
-                // this is a package file for a package with a different name
-                tracing::warn!("ignored package in wrong dir: {}", pkg_link.url);
-            } else if let Some((version, info)) = pkg_link.version_info() {
-                report.add_version(pkg_name, &version, info);
-            }
-        }
-    }
-
-    // (2) extract links to channel dirs
-    let (channel_dirs, links) = split_links(links, is_channel_dir);
-
-    // (3) extract link to channels.json
-    let (channels_json, links) = split_links(links, is_channels_json);
-
-    // (4) extract link to channels.json
-    let (kv_json, links) = split_links(links, is_kv_json);
-
-    // for each channel dir, scan for package files
-    for channel in channel_dirs {
-        if let Some(channel_name) = channel_dir_to_name(&channel.text) {
-            tracing::trace!(channel=channel_name, url=channel.url, "scanning channel dir");
-            if let Ok(url) = Url::parse(&channel.url) {
-                let links = scrape_links_from(client, &url).unwrap_or_default();
-
-                // add the package files found in this dir to the overall packages list
-                let (channel_pkg_files, _) = split_links(links, is_pkg_link);
-                for link in channel_pkg_files {
-                    if let Some((link_pkg_name, version)) = package::split_parts(&link.text) {
-                        if pkg_name == link_pkg_name {
-                            if let Some((version, info)) = link.version_info() {
-                                report.add_version(pkg_name, &version, info);
-                                report.add_channel_version(pkg_name, channel_name, &version);
-                            }
-                        } else {
-                            // this file doesn't belong in this dir
-                            // this is a package file for a package with a different name
-                            tracing::warn!("found package in wrong dir: {}", link.url);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // parse the channels.json file and apply any channels to versions as it specifies
-    if let Some(channels_json) = channels_json.first() {
-        if let Ok(url) = Url::parse(&channels_json.url) {
-            if let Ok(body) = fetch_page(client, &url) {
-                match serde_json::from_str::<ChannelList>(&body) {
-                    Ok(channels) => {
-                        //println!("channels json: {:?}", channels);
-                        for (chan_name, versions) in channels {
-                            for v in versions {
-                                report.add_channel_version(pkg_name, &chan_name, &v);
-                            }
-                        }
-                    },
-                    Err(_) => {
-                        tracing::debug!("invalid json at {}", url.as_str());
-                    }
-                }
-            }
-        }
-    }
-
-    // parse the kv.json file and save the result
-    if let Some(kv_url) = kv_json.first() {
-        if let Ok(url) = Url::parse(&kv_url.url) {
-            if let Ok(body) = fetch_page(client, &url) {
-                if let Ok(kv) = serde_json::from_str(&body) {
-                    report.add_kv(pkg_name, kv);
-                }
-            }
-        }
-    }
+    runtime.block_on(masync::full_scan(semaphore, timeout, root_url, pkg_name))
 }
 
 pub fn get_size(timeout: Option<u64>, url: &str) -> Result<u64> {
 
     let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
 
-    // re-usable client connection
+    let url = Url::parse(url)?;
+
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(timeout))
         .build()?;
-
-    let url = Url::parse(url)?;
 
     let resp = client.head(url).send()?;
 
@@ -375,12 +211,11 @@ pub fn download(timeout: Option<u64>, url: &str, write: &mut dyn std::io::Write)
 
     let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
 
-    // re-usable client connection
+    let url = Url::parse(url)?;
+
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(timeout))
         .build()?;
-
-    let url = Url::parse(url)?;
 
     client_download(&client, &url, write)
 }
@@ -389,13 +224,13 @@ pub fn client_download(client: &Client, url: &Url, write: &mut dyn std::io::Writ
 
     tracing::trace!("downloading {url}");
 
-    // TODO probably want to find a better way to download,
-    // this has the entire file in memory before writing to file
-    let mut resp = client.get(url.as_str()).send()?;
-    let err = resp.error_for_status_ref();
-    if err.is_ok() {
-        return Ok(resp.copy_to(write)?);
+    let resp = client.get(url.as_str()).send()?;
+    match resp.error_for_status() {
+        Err(e) => {
+            anyhow::bail!(e)
+        }
+        Ok(mut resp) => {
+            Ok(resp.copy_to(write)?)
+        }
     }
-    resp.error_for_status()?;
-    Ok(0)
 }
