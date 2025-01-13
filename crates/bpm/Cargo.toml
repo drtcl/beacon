@@ -22,7 +22,7 @@ anyhow = { workspace = true }
 blake3 = { workspace = true }
 camino = { workspace = true, features = ["serde1"] }
 chrono = { workspace = true, features = ["serde"] }
-clap = { workspace = true, features = ["cargo"] }
+clap = { workspace = true, features = ["cargo", "color"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
 directories = { workspace = true }
 humantime = { workspace = true }

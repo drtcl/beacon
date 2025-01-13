@@ -1,4 +1,4 @@
-use clap::{Command, Arg, arg, ArgAction};
+use clap::{Command, Arg, arg, ArgAction, builder::styling};
 use crate::provider;
 
 pub fn pull_many_opt<'a>(matches: &'a clap::ArgMatches, key: &str) -> Option<Vec<&'a String>> {
@@ -23,10 +23,18 @@ fn providers_arg() -> Arg {
 
 pub fn get_cli() -> Command {
 
+    const STYLES: styling::Styles = styling::Styles::styled()
+        .header(styling::AnsiColor::Yellow.on_default().bold())
+        .usage(styling::AnsiColor::Green.on_default().bold())
+        .literal(styling::AnsiColor::Blue.on_default().bold())
+        .placeholder(styling::AnsiColor::Cyan.on_default());
+
     let cli = Command::new("bpm")
         .version(clap::crate_version!())
         .about("The Beacon Package Manager : bpm : A simple, generic, general-purpose package manager")
         .author("Bryan Splitgerber")
+        .color(clap::ColorChoice::Auto)
+        .styles(STYLES)
         .arg(arg!(-c --config <file> "use a specific config file"))
         .subcommand_required(true)
         .subcommand(
