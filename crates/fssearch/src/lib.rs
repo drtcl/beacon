@@ -39,7 +39,7 @@ type ChannelList = HashMap<ChannelName, Vec<PackageVersion>>;
 ///         bar/
 ///             bar-0.1.0.bpm
 /// ```
-pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::ScanResult> {
+pub fn full_scan(dir: &Path, filter_name: Option<&str>, archs: Option<&[&str]>)-> Result<scan_result::ScanResult> {
 
     trace!(filter_name, dir=?dir, "full_scan");
 
@@ -121,21 +121,17 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::Sc
             let pkg_name = parent_dir_name.unwrap();
             kv_json_files.push((pkg_name.to_string(), full_path.clone()));
 
-        } else if let Some((pkg_name, pkg_version)) = package::split_parts(filename) {
+        } else if let Some((pkg_name, pkg_version, arch)) = package::split_parts(filename) {
 
             if depth == 1 && is_valid_package_name {
 
                 // flat layout
                 // pkg/foo-1.2.3.bpm
 
-                let vi = scan_result::VersionInfo {
-                    channels: Vec::new(),
-                    uri: full_path.to_string(),
-                    filename: filename.to_string(),
-                };
-
-                report.add_version(pkg_name, pkg_version, vi);
-                tracing::debug!("[f] found {}", rel_path);
+                if arch_filter(arch, archs) {
+                    report.add_version(pkg_name, pkg_version, arch, None, filename, full_path.as_str());
+                    tracing::debug!("[f] found {}", rel_path);
+                }
 
             } else if depth == 2 && is_valid_package_name {
 
@@ -144,14 +140,10 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::Sc
                 // pkg/foo/foo-1.2.3.bpm
 
                 if parent_dir_name == Some(pkg_name) {
-                    let vi = scan_result::VersionInfo {
-                        channels: Vec::new(),
-                        uri: full_path.to_string(),
-                        filename: filename.to_string(),
-                    };
-
-                    report.add_version(pkg_name, pkg_version, vi);
-                    tracing::trace!("[n] found {}", rel_path);
+                    if arch_filter(arch, archs) {
+                        report.add_version(pkg_name, pkg_version, arch, None, filename, full_path.as_str());
+                        tracing::trace!("[n] found {}", rel_path);
+                    }
                 } else {
                     tracing::warn!("found package in wrong dir {}", full_path);
                 }
@@ -167,13 +159,10 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::Sc
 
                 if let (Some(pkg_dir_name), Some(channel_name)) = (pkg_dir_name, channel_name) {
                     if pkg_dir_name == pkg_name {
-                        let vi = scan_result::VersionInfo {
-                            channels: vec![channel_name.to_string()],
-                            uri: full_path.to_string(),
-                            filename: filename.to_string(),
-                        };
-                        report.add_version(pkg_name, pkg_version, vi);
-                        tracing::trace!("[c] found {}", rel_path);
+                        if arch_filter(arch, archs) {
+                            report.add_version(pkg_name, pkg_version, arch, Some(channel_name), filename, full_path.as_str());
+                            tracing::trace!("[c] found {}", rel_path);
+                        }
                     } else {
                         tracing::warn!("found package in wrong dir {}", full_path);
                     }
@@ -188,7 +177,7 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::Sc
         if let Ok(channels) = parse_channels(channels_json_path) {
             for (chan_name, versions) in channels {
                 for v in versions {
-                    report.add_channel_version(pkg_name, &chan_name, &v);
+                    report.insert_channel(pkg_name, &v, &chan_name);
                 }
             }
         }
@@ -210,6 +199,23 @@ pub fn full_scan(dir: &Path, filter_name: Option<&str>)-> Result<scan_result::Sc
 
     //dbg!(&report);
     Ok(report)
+}
+
+/// return true if arch passes the arch filters
+fn arch_filter(arch: Option<&str>, filters: Option<&[&str]>) -> bool {
+
+    match filters {
+        None => { return true; },
+        Some(filters) => {
+            for f in filters {
+                if package::ArchMatcher::from(*f).matches(arch) {
+                    return true
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn parse_channels<P: AsRef<Path>>(path: P) -> Result<ChannelList> {

@@ -3,6 +3,7 @@
 #![feature(io_error_more)]
 #![feature(extract_if)]
 #![feature(file_lock)]
+#![feature(iter_chain)]
 
 #![allow(dead_code)]
 #![allow(unused_imports)]
@@ -104,6 +105,26 @@ fn find_config_file() -> AResult<Utf8PathBuf> {
     Err(anyhow::anyhow!("cannot find config file"))
 }
 
+fn acquire_file_lock(path: &Utf8Path) -> AResult<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path).context("opening lockfile")?;
+
+    if !file.try_lock().context("file lock")? {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if !file.try_lock().context("file lock")? {
+            eprintln!("waiting for file lock");
+            file.lock().context("file lock")?;
+        }
+    }
+
+    //let file_lock = Some(file);
+    return Ok(file);
+}
+
 fn main() -> AResult<()> {
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -140,6 +161,15 @@ fn main() -> AResult<()> {
         db: db::Db::new(),
         db_loaded: false,
         provider_filter: provider::ProviderFilter::empty(),
+        arch_filter: vec!["".into()],
+    };
+
+    //TODO this is currently going to block things like parallel scans.
+    //should this be more fine grained?
+    let file_lock = if let Some(path) = &app.config.lockfile {
+        Some(acquire_file_lock(path)?)
+    } else {
+        None
     };
 
     match matches.subcommand() {
@@ -159,13 +189,15 @@ fn main() -> AResult<()> {
                     app.cache_evict(pkg, version, in_use)?;
                 },
                 Some(("list", matches)) => {
-                    //let pkg = matches.get_one::<String>("pkg").unwrap();
                     app.cache_list()?;
                 },
                 Some(("fetch", matches)) => {
 
                     let pkgs = matches.get_many::<String>("pkg")
                         .map_or(Vec::new(), |given| given.collect());
+
+                    let arch = args::pull_many_opt(matches, "arch");
+                    app.setup_arch_filter(arch);
 
                     app.provider_filter = args::parse_providers(matches);
                     app.cache_fetch(&pkgs)?;
@@ -181,7 +213,7 @@ fn main() -> AResult<()> {
                     app.cache_touch(pkg, version, duration)?;
                 },
                 _ => {
-                    todo!("NYI");
+                    unreachable!();
                 }
             }
         }
@@ -203,6 +235,9 @@ fn main() -> AResult<()> {
                 std::time::Duration::from_secs(0)
             };
 
+            let arch = args::pull_many_opt(sub_matches, "arch");
+            app.setup_arch_filter(arch);
+
             app.provider_filter = args::parse_providers(sub_matches);
 
             app.scan_cmd(debounce)?;
@@ -213,6 +248,9 @@ fn main() -> AResult<()> {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
             let update = sub_matches.get_flag("update");
             let reinstall = sub_matches.get_flag("reinstall");
+
+            let arch = args::pull_many_opt(sub_matches, "arch");
+            app.setup_arch_filter(arch);
 
             app.provider_filter = args::parse_providers(sub_matches);
             app.install_cmd(pkg_name, no_pin, update, reinstall)?;
@@ -230,6 +268,8 @@ fn main() -> AResult<()> {
                 .map_or(Vec::new(), |given| given.collect());
 
             app.provider_filter = args::parse_providers(sub_matches);
+
+            app.setup_arch_filter(None);
 
             app.update_packages_cmd(&pkg_names)?;
         }
@@ -262,7 +302,10 @@ fn main() -> AResult<()> {
         Some(("search", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
             let exact = sub_matches.get_flag("exact");
-            //println!("searching for package {}", pkg_name);
+
+            let arch = args::pull_many_opt(sub_matches, "arch");
+            app.setup_arch_filter(arch);
+
             app.search_cmd(pkg_name, exact)?;
         }
         Some(("query", sub_matches)) => {
@@ -288,6 +331,9 @@ fn main() -> AResult<()> {
                         .map(|v| v.collect::<Vec<&String>>())
                         .map(|v| v.iter().map(|s| s.as_str()).collect());
 
+                    let arch = args::pull_many_opt(sub_matches, "arch");
+                    app.setup_arch_filter(arch);
+
                     let provider = sub_matches.get_one::<String>("from-providers"); //.map(|s| s.as_str());
                     if let Some(provider) = provider {
                         if provider == "*" {
@@ -310,6 +356,7 @@ fn main() -> AResult<()> {
         }
     }
 
+    drop(file_lock);
     Ok(())
 }
 

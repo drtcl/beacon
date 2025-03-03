@@ -28,8 +28,8 @@ impl FileSystem {
 }
 
 impl scan_result::Scan for FileSystem {
-    fn scan(&self) -> anyhow::Result<scan_result::ScanResult> {
-        fssearch::full_scan(&self.root, None)
+    fn scan(&self, arch_filter: Option<&[&str]>) -> anyhow::Result<scan_result::ScanResult> {
+        fssearch::full_scan(&self.root, None, arch_filter)
     }
 }
 
@@ -54,7 +54,7 @@ impl Fetch for FileSystem {
                 .with_prefix("✓")
                 .with_style(ProgressStyle::with_template(
                     #[allow(clippy::literal_string_with_formatting_args)]
-                    " {spinner:.green} copying {msg:.cyan} {bytes_per_sec} {wide_bar:.green} {bytes}/{total_bytes} - {eta} "
+                    " {spinner:.green} downloading {msg:.cyan} {bytes_per_sec} {wide_bar:.green} {bytes}/{total_bytes} - {eta} "
                 ).unwrap())
         } else {
             ProgressBar::no_length()
@@ -62,7 +62,7 @@ impl Fetch for FileSystem {
                 .with_prefix("✓")
                 .with_style(ProgressStyle::with_template(
                     #[allow(clippy::literal_string_with_formatting_args)]
-                    " {spinner:.green} copying {msg:.cyan} {bytes_per_sec} {bytes} "
+                    " {spinner:.green} downloading {msg:.cyan} {bytes_per_sec} {bytes} "
                 ).unwrap())
         };
 
@@ -75,7 +75,8 @@ impl Fetch for FileSystem {
         let mut write = bar.wrap_write(write);
 
         // [debug] slow
-        //let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_millis(1));
+        #[cfg(feature="dev-debug-slow")]
+        let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_millis(1));
 
         let ret = std::io::copy(&mut file, &mut write).context("copy file");
 
@@ -86,10 +87,17 @@ impl Fetch for FileSystem {
             bar
         };
 
-        bar.set_style(ProgressStyle::with_template(
-            #[allow(clippy::literal_string_with_formatting_args)]
-            " {prefix:.green} copied  {msg:.cyan} {total_bytes} in {elapsed}").unwrap()
-        );
+        if ret.is_ok() {
+            bar.set_style(ProgressStyle::with_template(
+                #[allow(clippy::literal_string_with_formatting_args)]
+                " {prefix:.green} downloaded  {msg:.cyan} {total_bytes} in {elapsed}").unwrap()
+            );
+        } else {
+            bar.set_style(ProgressStyle::with_template(
+                #[allow(clippy::literal_string_with_formatting_args)]
+                " {prefix:.red} error       {msg:.cyan} fetch failed").unwrap()
+            );
+        }
         bar.finish();
 
         ret

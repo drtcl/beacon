@@ -17,4 +17,5 @@ pub struct SingleListing {
     pub filename: Filename,
     pub url: Url,
     pub channels: Vec<String>,
+    pub arch: Option<String>,
 }

@@ -102,17 +102,23 @@ pub fn get_filestate(path: &Utf8Path) -> FileState {
 pub struct SlowWriter<T: Write> {
     inner: T,
     duration: std::time::Duration,
+    //count: usize,
 }
 impl<T:Write> SlowWriter<T> {
     pub fn new(t: T, duration: std::time::Duration) -> Self {
         Self {
             inner: t,
             duration,
+            //count: 4 * 1024 * 1024,
         }
     }
 }
 impl<T:Write> Write for SlowWriter<T> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        //if data.len() > self.count {
+            //return Err(std::io::Error::new(std::io::ErrorKind::Other, "bail"));
+        //}
+        //self.count -= data.len();
         std::thread::sleep(self.duration);
         self.inner.write(data)
     }

@@ -439,6 +439,7 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
 
     let require_semver = *matches.get_one::<bool>("semver").unwrap();
     let package_version = Version::new(matches.get_one::<String>("version").unwrap());
+    let package_arch = matches.get_one::<String>("arch").map(|s| s.as_str());
     let package_filepath = matches.get_one::<String>("pkgfile").unwrap();
     let package_filepath = Utf8PathBuf::from_path_buf(PathBuf::from(package_filepath)).expect("failed to get file path");
     let package_filename = package_filepath.file_name().context("failed to get filename")?;
@@ -454,19 +455,28 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
         anyhow::bail!("no such file");
     }
 
-    if let Some((name, _version)) = package::split_parts(package_filename) {
+    if let Some((name, _version, arch)) = package::split_parts(package_filename) {
+
+        if arch.is_some() && arch != package_arch {
+            println!("warning: arch changing from '{}' to '{}'.", arch.unwrap(), package_arch.unwrap_or(""));
+        }
+
+        let package_arch = package_arch.or(arch);
+        if !package::is_valid_arch(package_arch) {
+            anyhow::bail!("invalid arch");
+        }
 
         //if _version != "unversioned" {
             //anyhow::bail!("refusing to set the version of an already versioned package");
         //}
 
-        let new_filename = package::make_packagefile_name(name, &package_version);
+        let new_filename = package::make_packagefile_name(name, &package_version, package_arch);
         let new_filepath = package_filepath.with_file_name(new_filename);
 
-        let out_file = std::fs::File::create(new_filepath).context("failed to open file for writing")?;
+        let out_file = std::fs::File::create(&new_filepath).context("failed to open file for writing")?;
         let mut out_tar = tar::Builder::new(out_file);
 
-        let in_file = std::fs::File::open(package_filepath).context("failed to open file for reading")?;
+        let in_file = std::fs::File::open(&package_filepath).context("failed to open file for reading")?;
         let mut tar = tar::Archive::new(in_file);
 
         for mut entry in tar.entries().context("failed to read tar")?.flatten() {
@@ -478,8 +488,10 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
                 // extract the MetaData struct
                 let mut md = package::MetaData::from_reader(&mut entry).context("failed to extra metadata")?;
 
-                // update the version
+                // update the version, arch, and create a new uuid
                 md.version = package_version.to_string();
+                md.arch = package_arch.map(String::from);
+                md.uuid = uuid::Uuid::new_v4().to_string();
 
                 // re-serialize the struct and write that to the tar
                 let mut md_file = Vec::new();
@@ -499,6 +511,8 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
         let mut out_file = out_tar.into_inner()?;
         out_file.flush()?;
         drop(out_file);
+
+        println!("Package created: {}", new_filepath);
     }
 
     Ok(())
@@ -669,6 +683,11 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         package_version
     };
 
+    let package_arch = matches.get_one::<String>("arch").map(|s| s.as_str());
+    if !package::is_valid_arch(package_arch) {
+        anyhow::bail!("invalid arch");
+    }
+
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
     let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore, &mode_matcher)?;
 
@@ -676,7 +695,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // - data - all target file in the package
     // - meta - meta data about data files
 
-    let package_file_path = PathBuf::from(&output_dir).join(package::make_packagefile_name(package_name, package_version.as_str()));
+    let package_filename = package::make_packagefile_name(package_name, package_version.as_str(), package_arch);
+    let package_file_path = PathBuf::from(&output_dir).join(&package_filename);
 
     // scan the file list and verify symlinks
     let symlink_settings = SymlinkSettings {
@@ -759,11 +779,11 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let mut meta = package::MetaData::new(package::PackageID {
             name: package_name.clone(),
             version: package_version.to_string(),
+            arch: package_arch.map(String::from),
         })
         .with_description(description)
         .with_kv(kv)
         .with_uuid(uuid::Uuid::new_v4().to_string());
-
 
     // insert dependencies
     for pair in &deps {
@@ -957,15 +977,20 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     //println!("{:#?}", {let mut x = meta.clone(); x.files.clear(); x});
 
+    //println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
+    println!("package name:           {}", package_name);
+    println!("package version:        {}", package_version);
+    //println!("package arch:           {}", package_arch.map_or("noarch", |s| s.as_str()));
+    println!("package arch:           {}", package_arch.unwrap_or("noarch"));
+    println!("package filename:       {}", package_filename);
+    println!("package hash [blake3]:  {}", package_hash);
+    println!("package size:           {} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
     println!("data file count:        {}", file_included_count);
     println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
     println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
     println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
     println!("data hash [blake3]:     {}", data_tar_hash);
-    println!("package hash [blake3]:  {}", package_hash);
-    println!("package size:           {} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
-    //println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
-    println!("Package created at {}", std::fs::canonicalize(package_file_path.as_path())?.display());
+    println!("package created at:     {}", std::fs::canonicalize(package_file_path.as_path())?.display());
 
     Ok(())
 }

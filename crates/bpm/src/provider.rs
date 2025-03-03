@@ -228,7 +228,7 @@ mod test {
         }
     }
     impl scan_result::Scan for FakeProvider {
-        fn scan(&self) -> anyhow::Result<scan_result::ScanResult> {
+        fn scan(&self, _arch: Option<&[&str]>) -> anyhow::Result<scan_result::ScanResult> {
             unreachable!()
         }
     }

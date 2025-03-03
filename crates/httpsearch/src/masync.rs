@@ -23,7 +23,14 @@ async fn scrape_links_from(semaphore: &Semaphore, client: &Arc<Client>, url: &Ur
     Ok(links)
 }
 
-async fn scan_package_dir(semaphore: Arc<Semaphore>, client: Arc<Client>, report: Arc<Mutex<scan_result::ScanResult>>, pkg_name: String, dir_link: Link) {
+async fn scan_package_dir(
+    semaphore: Arc<Semaphore>,
+    client: Arc<Client>,
+    report: Arc<Mutex<scan_result::ScanResult>>,
+    pkg_name: String,
+    archs: Arc<Vec<String>>,
+    dir_link: Link
+) {
 
     trace!(url=dir_link.url, "scanning package dir {}", pkg_name);
 
@@ -41,14 +48,16 @@ async fn scan_package_dir(semaphore: Arc<Semaphore>, client: Arc<Client>, report
 
     // add all found packages to the report
     for pkg_link in pkg_files {
-        if let Some((name, _version)) = package::split_parts(&pkg_link.text) {
+        if let Some((name, _version, _arch)) = package::split_parts(&pkg_link.text) {
             if name != pkg_name {
                 // this file doesn't belong in this dir
                 // this is a package file for a package with a different name
                 tracing::warn!("ignored package in wrong dir: {}", pkg_link.url);
-            } else if let Some((version, info)) = pkg_link.version_info() {
-                let mut report = report.lock().unwrap();
-                report.add_version(&pkg_name, &version, info);
+            } else if let Some(info) = pkg_link.version_info() {
+                if arch_filter(info.arch, &archs) {
+                    let mut report = report.lock().unwrap();
+                    report.add_version(&pkg_name, info.version, info.arch, info.channel, info.filename, info.url);
+                }
             }
         }
     }
@@ -74,18 +83,20 @@ async fn scan_package_dir(semaphore: Arc<Semaphore>, client: Arc<Client>, report
                 let report = Arc::clone(&report);
                 let pkg_name = pkg_name.clone();
                 let channel_name = channel_name.to_string();
+                let archs = Arc::clone(&archs);
                 joinset.spawn(async move {
                     let links = scrape_links_from(&semaphore, &client, &url).await.unwrap_or_default();
 
                     // add the package files found in this dir to the overall packages list
                     let (channel_pkg_files, _) = split_links(links, is_pkg_link);
-                    let mut report = report.lock().unwrap(); 
+                    let mut report = report.lock().unwrap();
                     for link in channel_pkg_files {
-                        if let Some((link_pkg_name, _version)) = package::split_parts(&link.text) {
+                        if let Some((link_pkg_name, _version, _arch)) = package::split_parts(&link.text) {
                             if pkg_name == link_pkg_name {
-                                if let Some((version, info)) = link.version_info() {
-                                    report.add_version(&pkg_name, &version, info);
-                                    report.add_channel_version(&pkg_name, &channel_name, &version);
+                                if let Some(info) = link.version_info() {
+                                    if arch_filter(info.arch, &archs) {
+                                        report.add_version(&pkg_name, info.version, info.arch, Some(channel_name.as_str()), info.filename, info.url);
+                                    }
                                 }
                             } else {
                                 // this file doesn't belong in this dir
@@ -99,40 +110,13 @@ async fn scan_package_dir(semaphore: Arc<Semaphore>, client: Arc<Client>, report
         }
     }
 
-    // parse the channels.json file and apply any channels to versions as it specifies
-    if let Some(channels_json) = channels_json.first() {
-        if let Ok(url) = Url::parse(&channels_json.url) {
-            let semaphore = Arc::clone(&semaphore);
-            let client = Arc::clone(&client);
-            let report = Arc::clone(&report);
-            let pkg_name = pkg_name.clone();
-            joinset.spawn(async move {
-                if let Ok(body) = fetch_page(&semaphore, &client, &url).await {
-                    match serde_json::from_str::<ChannelList>(&body) {
-                        Ok(channels) => {
-                            //println!("channels json: {:?}", channels);
-                            let mut report = report.lock().unwrap();
-                            for (chan_name, versions) in channels {
-                                for v in versions {
-                                    report.add_channel_version(&pkg_name, &chan_name, &v);
-                                }
-                            }
-                        },
-                        Err(_) => {
-                            tracing::debug!("invalid json at {}", url.as_str());
-                        }
-                    }
-                }
-            });
-        }
-    }
-
     // parse the kv.json file and save the result
     if let Some(kv_url) = kv_json.first() {
         if let Ok(url) = Url::parse(&kv_url.url) {
             let semaphore = Arc::clone(&semaphore);
             let client = Arc::clone(&client);
             let report = Arc::clone(&report);
+            let pkg_name = pkg_name.clone();
             joinset.spawn(async move {
                 if let Ok(body) = fetch_page(&semaphore, &client, &url).await {
                     if let Ok(kv) = serde_json::from_str(&body) {
@@ -146,9 +130,65 @@ async fn scan_package_dir(semaphore: Arc<Semaphore>, client: Arc<Client>, report
 
     // wait for everything to complete
     joinset.join_all().await;
+
+    // now that everything else is complete, we can add channels from the channels.json file.
+    // parse the channels.json file and apply any channels to versions as it specifies
+    if let Some(channels_json) = channels_json.first() {
+        if let Ok(url) = Url::parse(&channels_json.url) {
+            if let Ok(body) = fetch_page(&semaphore, &client, &url).await {
+                match serde_json::from_str::<ChannelList>(&body) {
+                    Ok(channels) => {
+                        //println!("channels json: {:?}", channels);
+                        let mut report = report.lock().unwrap();
+                        for (chan_name, versions) in channels {
+                            for v in versions {
+                                report.insert_channel(&pkg_name, &v, &chan_name);
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        tracing::debug!("invalid json at {}", url.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+
 }
 
-pub async fn full_scan(semaphore: Arc<Semaphore>, _timeout: Option<u64>, root_url: &str, filter_name: Option<&str>)-> Result<scan_result::ScanResult> {
+/// return true if name passes the name filter
+fn name_filter(name: &str, filter: Option<&str>) -> bool {
+    if let Some(filter) = filter {
+        name == filter
+    } else {
+        true
+    }
+}
+
+/// return true if arch passes the arch filters
+fn arch_filter(arch: Option<&str>, filters: &Vec<String>) -> bool {
+
+    if filters.is_empty() {
+        return true;
+    }
+
+    for f in filters {
+        if package::ArchMatcher::from(f.as_str()).matches(arch) {
+            return true
+        }
+    }
+
+    false
+}
+
+pub async fn full_scan(
+    semaphore: Arc<Semaphore>,
+    _timeout: Option<u64>,
+    root_url: &str,
+    filter_name: Option<&str>,
+    archs: Arc<Vec<String>>,
+) -> Result<scan_result::ScanResult> {
 
     let client = reqwest::Client::new();
     let client = Arc::new(client);
@@ -170,19 +210,10 @@ pub async fn full_scan(semaphore: Arc<Semaphore>, _timeout: Option<u64>, root_ur
 
     for link in flat_package_links {
         tracing::debug!("found at toplevel: {}", &link.text);
-        if let Some((pkg_name, version)) = package::split_parts(&link.text) {
-            if let Some((_version, info)) = link.version_info() {
-
-                let mut add = true;
-
-                if let Some(filter_name) = filter_name {
-                    if filter_name != pkg_name {
-                        add = false;
-                    }
-                }
-
-                if add {
-                    report.add_version(pkg_name, version, info);
+        if let Some((pkg_name, version, arch)) = package::split_parts(&link.text) {
+            if let Some(info) = link.version_info() {
+                if name_filter(pkg_name, filter_name) && arch_filter(arch, &archs) {
+                    report.add_version(pkg_name, version, info.arch, None, info.filename, info.url);
                 }
             }
         }
@@ -201,7 +232,7 @@ pub async fn full_scan(semaphore: Arc<Semaphore>, _timeout: Option<u64>, root_ur
 
     // if filtering, remove non-matching package dirs
     if let Some(filter_name) = filter_name {
-        pkg_dir_links.retain(|link| filter_name == strip_slash(&link.text));
+        pkg_dir_links.retain(|link| name_filter(strip_slash(&link.text), Some(filter_name)));
     }
 
     for link in pkg_dir_links {
@@ -210,8 +241,9 @@ pub async fn full_scan(semaphore: Arc<Semaphore>, _timeout: Option<u64>, root_ur
         let client = Arc::clone(&client);
         let report = Arc::clone(&report);
         let semaphore = Arc::clone(&semaphore);
+        let archs = Arc::clone(&archs);
         let _handle = joinset.spawn(async move {
-            scan_package_dir(semaphore, client, report, pkg_name, link).await
+            scan_package_dir(semaphore, client, report, pkg_name, archs, link).await
         });
     }
 

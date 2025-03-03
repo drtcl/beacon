@@ -90,6 +90,7 @@ pub struct FileInfo {
 pub struct PackageID {
     pub name: String,
     pub version: Version,
+    pub arch: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -97,7 +98,6 @@ pub struct DependencyID {
     pub name: String,
     pub version: Option<Version>,
 }
-
 
 /// Information about a package.
 /// - package name and version
@@ -113,6 +113,7 @@ pub struct MetaData {
     //pub id: PackageID,
     pub name: String,
     pub version: Version,
+    pub arch: Option<String>,
     pub mount: Option<String>,
     pub data_hash: Option<String>,
 
@@ -266,6 +267,7 @@ impl MetaData {
             //id,
             name: id.name,
             version: id.version,
+            arch: id.arch,
             mount: None,
             data_hash: None,
             data_size: 0,
@@ -296,6 +298,7 @@ impl MetaData {
         PackageID {
             name: self.name.clone(),
             version: self.version.clone(),
+            arch: self.arch.clone(),
         }
     }
 
@@ -458,36 +461,48 @@ pub fn get_filelist(pkg_file: &mut File) -> Result<OrderedMap<FilePath, FileInfo
     Ok(metadata.files)
 }
 
-/// "foo_1.2.3" -> ("foo", "1.2.3")
-/// "foo-bar_1.2.3-alpha.bpm" -> ("foo-bar", "1.2.3-alpha")
-pub fn split_parts(filename: &str) -> Option<(&str, &str)> {
+/// "foo_1.2.3" -> ("foo", "1.2.3", None)
+/// "foo_1.2.3_linux64" -> ("foo", "1.2.3", Some("linux64"))
+/// "foo-bar_1.2.3-alpha.bpm" -> ("foo-bar", "1.2.3-alpha", None)
+pub fn split_parts(filename: &str) -> Option<(&str, &str, Option<&str>)> {
 
     let filename = filename.strip_suffix(DOTTED_PKG_FILE_EXTENSION).unwrap_or(filename);
-    let mut parts = filename.split('_');
 
-    let name = parts.next();
-    let version = parts.next();
-    let _reserved = parts.next();
-    let _none = parts.next();
+    let mut it = filename.splitn(3, '_');
+    let name = it.next();
+    let version = it.next();
+    let arch = it.next();
 
-    if let (Some(name), Some(version)) = (name, version) {
-        Some((name, version))
-    } else {
-        None
+    // require a name and version
+    match (name, version, arch) {
+        (Some(name), Some(version), arch) => Some((name, version, arch)),
+        _ => None,
     }
 }
 
-/// Names like "foo-1.0.0.bpm" and "bar-0.2.1.bpm" are packagefile names
+pub fn make_packagefile_name(pkg_name: &str, version: &str, arch: Option<&str>) -> String {
+
+    match arch {
+        Some(arch) if !arch.is_empty() =>
+            format!("{pkg_name}_{version}_{arch}{DOTTED_PKG_FILE_EXTENSION}"),
+        _ =>
+            format!("{pkg_name}_{version}{DOTTED_PKG_FILE_EXTENSION}")
+    }
+}
+
+/// Names like "foo_1.0.0.bpm", "bar_0.2.1.bpm", "baz_1.2.3_linux64.bpm" are packagefile names
 pub fn is_packagefile_name(text: &str) -> bool {
     if text.ends_with(DOTTED_PKG_FILE_EXTENSION) {
-        if let Some((name, version)) = split_parts(text) {
-            return is_valid_package_name(name) && is_valid_version(version)
+        if let Some((name, version, arch)) = split_parts(text) {
+            return is_valid_package_name(name)
+                && is_valid_version(version)
+                && is_valid_arch(arch)
         }
     }
     false
 }
 
-/// Names like "foo" and "bar" are package names
+/// Names like "foo", "foo9", and "foo-bar" are package names
 pub fn is_valid_package_name(text: &str) -> bool {
     // cannot be empty string
     // cannot contain underscore _
@@ -504,10 +519,6 @@ pub fn is_valid_package_name(text: &str) -> bool {
         })
         && !text.ends_with('-')
         && !text.contains("--")
-}
-
-pub fn make_packagefile_name(pkg_name: &str, version: &str) -> String {
-    format!("{pkg_name}_{version}{DOTTED_PKG_FILE_EXTENSION}")
 }
 
 /// strings like "1.2.3" and "0.0.1-alpha+linux" are version strings
@@ -532,11 +543,86 @@ pub fn is_valid_version(text: &str) -> bool {
         })
 }
 
-pub fn filename_match(filename: &str, id: &PackageID) -> bool {
-    if let Some((name, version)) = split_parts(filename) {
-        return name == id.name && version == id.version;
+/// strings like "", "noarch", "linux_x86_64", "linux-aarch64" are valid arch strings
+pub fn is_valid_arch(text: Option<&str>) -> bool {
+
+    // must be [a-zA-Z][a-zA-Z0-9_\-]*
+    // must start with alphabetic
+    // must end with alphanumeric
+    // can contain singluar - or _
+    match text {
+        None | Some("") => true,
+        Some(text) =>
+            text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                && !text.contains("--")
+                && !text.contains("__")
+                && !text.contains("_-")
+                && !text.contains("-_")
+                && !text.starts_with('-')
+                && !text.starts_with('_')
+                && !text.ends_with('-')
+                && !text.ends_with('_'),
     }
-    false
+}
+
+pub fn filename_match(filename: &str, id: &PackageID) -> bool {
+    let mut ret = false;
+    if let Some((name, version, arch)) = split_parts(filename) {
+        ret = name == id.name
+            && version == id.version
+            && ArchMatcher::from(arch).matches(&id.arch);
+    }
+    //tracing::trace!("filename_match {} {:?} => {}", filename, id, ret);
+    ret
+}
+
+#[derive(Debug)]
+pub enum ArchMatcher {
+    Any,
+    None,
+    Some(String),
+}
+
+impl From<&str> for ArchMatcher {
+    fn from(value: &str) -> Self {
+        match value {
+            "*" => ArchMatcher::Any,
+            "" | "noarch" => ArchMatcher::None,
+            x => ArchMatcher::Some(x.into()),
+        }
+    }
+}
+
+impl From<&String> for ArchMatcher {
+    fn from(value: &String) -> Self {
+        ArchMatcher::from(value.as_str())
+    }
+}
+
+impl From<&Option<String>> for ArchMatcher {
+    fn from(value: &Option<String>) -> Self {
+        ArchMatcher::from(value.as_deref())
+    }
+}
+
+impl From<Option<&str>> for ArchMatcher {
+    fn from(value: Option<&str>) -> Self {
+        match value {
+            None => ArchMatcher::None,
+            Some(value) => ArchMatcher::from(value),
+        }
+    }
+}
+
+impl ArchMatcher {
+    pub fn matches<T: Into<ArchMatcher>>(&self, other: T) -> bool {
+        match (self, &other.into()) {
+            (Self::Any, _) => true,
+            (Self::None, Self::None) => true,
+            (Self::Some(x), Self::Some(y)) if x == y => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -544,10 +630,47 @@ mod test {
     use super::*;
 
     #[test]
+    fn valid_arch() {
+        assert!(is_valid_arch(None));
+        assert!(is_valid_arch(Some("")));
+        assert!(is_valid_arch(Some("noarch")));
+        assert!(is_valid_arch(Some("linux")));
+        assert!(is_valid_arch(Some("linux-x86")));
+        assert!(is_valid_arch(Some("linux-x86_64")));
+        assert!(is_valid_arch(Some("linux_x86-64")));
+
+        assert!(!is_valid_arch(Some("linux--64")));
+        assert!(!is_valid_arch(Some("linux__64")));
+        assert!(!is_valid_arch(Some("linux-_64")));
+        assert!(!is_valid_arch(Some("linux_-64")));
+        assert!(!is_valid_arch(Some("-linux")));
+        assert!(!is_valid_arch(Some("_linux")));
+        assert!(!is_valid_arch(Some("linux-")));
+        assert!(!is_valid_arch(Some("linux_")));
+    }
+
+    #[test]
+    fn arch_match() {
+        assert!(ArchMatcher::from("").matches(""));
+        assert!(ArchMatcher::from("").matches(None));
+        assert!(ArchMatcher::from(None).matches(""));
+        assert!(ArchMatcher::from("*").matches(""));
+        assert!(ArchMatcher::from("*").matches("foo"));
+        assert!(ArchMatcher::from("*").matches(None));
+        assert!(ArchMatcher::from("foo").matches("foo"));
+
+        assert!(!ArchMatcher::from(None).matches("bar"));
+        assert!(!ArchMatcher::from("").matches("bar"));
+        assert!(!ArchMatcher::from("foo").matches("bar"));
+    }
+
+    #[test]
     fn package_names() {
 
-        assert_eq!(split_parts("foo_1.2.3.bpm"), Some(("foo", "1.2.3")));
-        assert_eq!(split_parts("foo-bar_1.2.3-alpha.1.bpm"), Some(("foo-bar", "1.2.3-alpha.1")));
+        assert_eq!(split_parts("foo_1.2.3.bpm"), Some(("foo", "1.2.3", None)));
+        assert_eq!(split_parts("foo-bar_1.2.3-alpha.1.bpm"), Some(("foo-bar", "1.2.3-alpha.1", None)));
+
+        assert_eq!(split_parts("foo_1.2.3_linux-x86_64.bpm"), Some(("foo", "1.2.3", Some("linux-x86_64"))));
 
         assert_eq!(split_parts("foo-1.2.3.bpm"), None);
 
@@ -558,9 +681,11 @@ mod test {
         assert!(is_packagefile_name("foo-bar_1.2.3+linux.bpm"));
         assert!(is_packagefile_name("foo-bar_1.2.3-alpha+linux.bpm"));
 
-        assert_eq!(make_packagefile_name("foo", "1.2.3"), "foo_1.2.3.bpm");
-        assert!(is_packagefile_name(&make_packagefile_name("foo", "1.2.3")));
-        assert_eq!(split_parts(&make_packagefile_name("foo", "1.2.3")), Some(("foo", "1.2.3")));
+        assert_eq!(make_packagefile_name("foo", "1.2.3", None), "foo_1.2.3.bpm");
+        assert_eq!(make_packagefile_name("foo", "1.2.3", Some("")), "foo_1.2.3.bpm");
+
+        assert!(is_packagefile_name(&make_packagefile_name("foo", "1.2.3", None)));
+        assert_eq!(split_parts(&make_packagefile_name("foo", "1.2.3", None)), Some(("foo", "1.2.3", None)));
     }
 
     fn get_instance() -> MetaData {
@@ -568,6 +693,7 @@ mod test {
             //id: PackageID {
                 name: "foo".into(),
                 version: "1.2.3".into(),
+                arch: None,
             //},
             mount: Some("EXT".into()),
             data_hash: None,
@@ -595,6 +721,7 @@ mod test {
                 hash: None,
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
         meta.add_file(
@@ -604,6 +731,7 @@ mod test {
                 hash: Some("2ffac14".into()),
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
         meta.add_file(
@@ -613,6 +741,7 @@ mod test {
                 hash: Some("1aef313".into()),
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
         meta.add_file(
@@ -622,6 +751,7 @@ mod test {
                 hash: Some("77af123".into()),
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
 
@@ -693,6 +823,7 @@ mod test {
             hash: None,
             mtime: Some(100),
             volatile: false,
+            size: None,
         };
 
         let s = FileInfoString("f::100".into());
@@ -709,6 +840,7 @@ mod test {
             hash: Some("a1b2".into()),
             mtime: Some(100),
             volatile: true,
+            size: None,
         };
 
         let s = FileInfoString("fv:a1b2:100".into());
@@ -726,6 +858,7 @@ mod test {
             hash: None,
             mtime: None,
             volatile: false,
+            size: None,
         };
 
         let s = FileInfoString("d".into());
@@ -743,6 +876,7 @@ mod test {
             hash: None,
             mtime: None,
             volatile: false,
+            size: None,
         };
 
         let s = FileInfoString("s:foo/bar".into());
@@ -760,6 +894,7 @@ mod test {
             hash: None,
             mtime: None,
             volatile: true,
+            size: None,
         };
 
         let s = FileInfoString("sv:foo/bar".into());

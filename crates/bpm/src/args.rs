@@ -21,6 +21,13 @@ fn providers_arg() -> Arg {
         .action(ArgAction::Append)
 }
 
+fn arch_arg() -> Arg {
+    arg!(--arch <archs> "Filter on specific arch strings")
+        .alias("archs")
+        .value_delimiter(',')
+        .action(ArgAction::Append)
+}
+
 pub fn get_cli() -> Command {
 
     const STYLES: styling::Styles = styling::Styles::styled()
@@ -42,41 +49,49 @@ pub fn get_cli() -> Command {
                 .about("Scan providers, updating provider package list caches")
                 .arg(arg!(--debounce <time> "Do not scan agian if last scan was within the given time"))
                 .arg(providers_arg())
+                .arg(arch_arg())
         )
         .subcommand(
             Command::new("search")
                 .about("Search for packages")
                 .arg(arg!(<pkg> "(partial) package name to search for"))
                 .arg(arg!(--exact "match package name exactly"))
+                .arg(arch_arg())
         )
         .subcommand(
             Command::new("list")
                 .about("List installed or available packages")
-                .subcommand(Command::new("installed").about("List currently installed packages"))
+                .subcommand(Command::new("installed").about("List currently installed packages")
+                    .arg(arg!(--"show-arch" "Show package architecture"))
+                    .after_help("Print a table of package name, version, channel, and optionally package architecture.\n\nThe version is prefixed with either = or ^.\n  = indicates that the package is pinned to this version\n  ^ means the package is eligible for updates.\nIf a channel is listed, the package is pinned to that channel.")
+                )
                 .subcommand(Command::new("available").about("List available packages")
                     .alias("avail")
                     .arg(arg!([pkg] "package name substring"))
                     .arg(arg!(--exact  "match package name exactly"))
-                    .arg(providers_arg())
-                    .arg(arg!(--json "output in json lines format"))
-                    .arg(arg!(--oneline "output in one package per line format")
-                        .conflicts_with("json")
-                    )
                     .arg(arg!(--limit <N> "Limit to the N latest versions per package")
                         .value_parser(clap::value_parser!(u32))
                         .default_value("0")
                     )
+                    .arg(arg!(--json "output in json lines format"))
+                    .arg(arg!(--oneline "output in one package per line format")
+                        .conflicts_with("json")
+                    )
+                    .arg(arg!(--"show-arch" "Show package architecture"))
+                    .arg(arch_arg())
                     .arg(arg!(--channels <channels> "Filter on only the given channels")
                         .alias("channel")
                         .value_delimiter(',')
                         .action(ArgAction::Append)
                     )
+                    .arg(providers_arg())
                 )
                 .subcommand(Command::new("channels")
                     .about("List the channels of packages")
                     .arg(arg!([pkg] "package name substring"))
                     .arg(arg!(--exact  "match package name exactly"))
                     .arg(arg!(--json "output in json lines format"))
+                    .arg(arch_arg())
                     .arg(providers_arg())
                 )
         )
@@ -88,6 +103,7 @@ pub fn get_cli() -> Command {
                 .arg(arg!(-u --update "Install a different version of an already installed package. No effect if pkg is not already installed."))
                 .arg(arg!(--reinstall "Allow installing the same version again."))
                 .arg(providers_arg())
+                .arg(arch_arg())
         )
         .subcommand(
             Command::new("uninstall")
@@ -112,7 +128,7 @@ pub fn get_cli() -> Command {
                 .arg(arg!(--mtime "Enable mtime verification"))
                 .arg(arg!(-v --verbose "Ouput extra information"))
         )
-        //TODO
+        //IDEA
         //.subcommand(
             //Command::new("restore")
                 //.about("Restore modified files within a package to original installation state")
@@ -162,6 +178,7 @@ pub fn get_cli() -> Command {
                          .require_equals(true)
                          .default_missing_value("*")
                     )
+                    .arg(arch_arg())
                     .after_help("With no additional args, the entire KV will be dumped in json format")
                 )
                 // other ideas:
@@ -202,6 +219,7 @@ pub fn get_cli() -> Command {
                     Command::new("fetch")
                         .about("Fetch a package and store it in the cache")
                         .arg(providers_arg())
+                        .arg(arch_arg())
                         .arg(arg!(<pkg>... "Package(s) to fetch"))
                 )
                 .subcommand(

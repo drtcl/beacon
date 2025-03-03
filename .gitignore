@@ -10,6 +10,7 @@ Cargo.lock
 **/*.rs.bk
 
 /crates/bpm/install
+/crates/bpm/lockfile
 /crates/bpm/db.json
 /crates/bpm/cache
 /crates/bpmpack/pkg_src

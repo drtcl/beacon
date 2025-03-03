@@ -1,6 +1,6 @@
 [package]
 name = "httpsearch"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [lib]
@@ -26,6 +26,7 @@ reqwest = { version = "0.11.14", default-features=false, features = ["blocking",
 scraper = "0.15.0"
 url = "2.4.0"
 tokio = { version = "1.43.0", features = ["full", "rt"] }
+clap.workspace = true
 
 [features]
 default = []

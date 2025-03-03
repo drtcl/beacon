@@ -1,8 +1,13 @@
-database = "${BPM}/../../crates/bpm/db.json"
+database = "${THIS}/crates/bpm/db.json"
+lockfile = "${THIS}/crates/bpm/lockfile"
+#arch = ["linux-x64", ""]
 
 [cache]
 dir = "${BPM}/../../crates/bpm/cache"
 retention = "10mins"
+auto_clean = true
+touch_on_uninstall = true
+fetch_jobs = 4
 
 [mount]
 TARGET = { default = true, path = "${THIS}/crates/bpm/install/target" }
@@ -11,3 +16,7 @@ TEST  = "${THIS}/crates/bpm/install/test"
 [providers]
 test1 = "http://localhost:8000/pkg/"
 test2 = "file://${THIS}/crates/bpmpack/pkg/"
+
+[providers.test3]
+path = "file://${THIS}/crates/bpmpack/pkg/"
+note = "some note"

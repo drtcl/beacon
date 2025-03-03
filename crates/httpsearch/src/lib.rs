@@ -51,18 +51,18 @@ type LinkText = String;
 type LinkUrlStr = String;
 
 type PackageVersion = VersionString;
-type PackagefileName = String;
 type ChannelName = String;
 
 // ChannelName -> [Version]
 type ChannelList = HashMap<ChannelName, Vec<PackageVersion>>;
 
-
 #[derive(Debug)]
-pub struct VersionInfo {
-    pub url: LinkUrlStr,
-    pub filename: PackagefileName,
-    pub channels: Vec<String>,
+pub struct VersionInfo<'a> {
+    pub version: &'a str,
+    pub url: &'a str,
+    pub filename: &'a str,
+    pub channel: Option<&'a str>,
+    pub arch: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -72,16 +72,16 @@ struct Link {
 }
 
 impl Link {
-    fn version_info(&self) -> Option<(PackageVersion, scan_result::VersionInfo)> {
-        if let Some((_name, version)) = package::split_parts(&self.text) {
-            return Some((
-                version.into(),
-                scan_result::VersionInfo {
-                    uri: self.url.clone(),
-                    filename: self.text.clone(),
-                    channels: Vec::new(),
-                }
-            ));
+    /// split out info parts of a link
+    fn version_info(&self) -> Option<VersionInfo> {
+        if let Some((_name, version, arch)) = package::split_parts(&self.text) {
+            return Some(VersionInfo {
+                version,
+                url: &self.url,
+                filename: &self.text,
+                channel: None,
+                arch,
+            });
         }
         None
     }
@@ -149,7 +149,6 @@ fn scrape_links(origin_url: &Url, body: &str) -> Vec<Link> {
             if let Ok(url) = origin_url.join(href) {
                 links.push(Link {
                     text: link_text,
-                    //url: href.to_string(),
                     url: url.to_string(),
                 })
             }
@@ -158,7 +157,7 @@ fn scrape_links(origin_url: &Url, body: &str) -> Vec<Link> {
     links
 }
 
-pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)-> Result<scan_result::ScanResult> {
+pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>, archs: Option<&[&str]>)-> Result<scan_result::ScanResult> {
 
     let threads = std::env::var("BPM_HTTP_THREADS")
         .ok()
@@ -184,7 +183,14 @@ pub fn full_scan(timeout: Option<u64>, root_url: &str, pkg_name: Option<&str>)->
 
     let semaphore = Arc::new(Semaphore::new(jobs));
 
-    runtime.block_on(masync::full_scan(semaphore, timeout, root_url, pkg_name))
+    let archs : Arc<Vec<String>> = Arc::new(
+        match archs {
+            None => Vec::new(),
+            Some(s) => s.iter().map(|s| s.to_string()).collect(),
+        }
+    );
+
+    runtime.block_on(masync::full_scan(semaphore, timeout, root_url, pkg_name, archs))
 }
 
 pub fn get_size(timeout: Option<u64>, url: &str) -> Result<u64> {

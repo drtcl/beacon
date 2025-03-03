@@ -38,6 +38,7 @@ panic = "abort"
 [workspace.lints.clippy]
 needless_return = "allow"
 let_and_return = "allow"
+too_many_arguments = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.82"
@@ -52,7 +53,7 @@ ignore    = "0.4.22"
 indicatif = "0.17.8"
 itertools = "0.12.1"
 rand = "0.8.5"
-regex = "1.10.4"
+regex = "1.11.1"
 semver = "1.0.22"
 serde = { version = "1.0.199", features = ["derive"] }
 serde_derive = "1.0.199"

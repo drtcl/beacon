@@ -160,7 +160,7 @@ impl Db {
 
     pub fn cache_unuse_all_versions(&mut self, pkg_name: &str) {
         for file in self.cache_files.iter_mut() {
-            if let Some((name, _version)) = package::split_parts(&file.filename) {
+            if let Some((name, _version, _arch)) = package::split_parts(&file.filename) {
                 if name == pkg_name {
                     file.in_use = false;
                 }

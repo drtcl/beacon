@@ -20,8 +20,8 @@ impl Http {
 }
 
 impl scan_result::Scan for Http {
-    fn scan(&self) -> anyhow::Result<scan_result::ScanResult> {
-        httpsearch::full_scan(None, &self.url, None)
+    fn scan(&self, arch_filter: Option<&[&str]>) -> anyhow::Result<scan_result::ScanResult> {
+        httpsearch::full_scan(None, &self.url, None, arch_filter)
     }
 }
 
@@ -60,9 +60,10 @@ impl Fetch for Http {
         let mut write = bar.wrap_write(write);
 
         // [debug] slow
-        //let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_millis(1));
+        #[cfg(feature="dev-debug-slow")]
+        let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_millis(1));
 
-        let n = httpsearch::download(None, url, &mut write)?;
+        let ret = httpsearch::download(None, url, &mut write);
 
         let bar = if let Some(bars) = bars {
             bars.remove(&bar);
@@ -71,13 +72,20 @@ impl Fetch for Http {
             bar
         };
 
-        bar.set_style(ProgressStyle::with_template(
-            #[allow(clippy::literal_string_with_formatting_args)]
-            " {prefix:.green} downloaded  {msg:.cyan} {total_bytes} in {elapsed}").unwrap()
-        );
+        if ret.is_ok() {
+            bar.set_style(ProgressStyle::with_template(
+                #[allow(clippy::literal_string_with_formatting_args)]
+                " {prefix:.green} downloaded  {msg:.cyan} {total_bytes} in {elapsed}").unwrap()
+            );
+        } else {
+            bar.set_style(ProgressStyle::with_template(
+                #[allow(clippy::literal_string_with_formatting_args)]
+                " {prefix:.red} error       {msg:.cyan} fetch failed").unwrap()
+            );
+        }
         bar.finish();
 
-        Ok(n)
+        ret
     }
 }
 
