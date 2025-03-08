@@ -20,19 +20,19 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-//TODO threads for scanning multiple providers at a time
-//TODO dirs without write perms cause problems
 //TODO lockfile more granular
-//TODO multipe paths for a provider
+//TODO multiple paths for a provider
+//TODO dirs without write perms cause problems
 //TODO -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
 //
+//DONE threads for scanning multiple providers at a time
+//DONE config scan.threads
+//...
 //DONE make sure the directories can be made if they don't exist
 //DONE cleanup errors about not being able to read database file when it really doesn't need to read db
-//DONE http async, multi-scan
-//DONE fetch multiple packages at once
 //DONE http/file scan arch filters
 //DONE arch in config
-//DONE --arch in man subcmds
+//DONE --arch in many subcmds
 //DONE simple truthy replacements
 //DONE custom replacements
 //DONE env replacements
@@ -40,6 +40,9 @@ use std::time::Duration;
 //DONE cache auto_clean (install, uninstall, update)
 //DONE cache touch_on_uninstall
 //DONE multi provider fetching (failure fallback)
+//...
+//DONE http async, multi-scan
+//DONE fetch multiple packages at once
 
 mod list;
 
@@ -1726,42 +1729,69 @@ impl App {
         // make sure there is a cache/provider dir to cache search results in
         create_dir(join_path!(&self.config.cache_dir, "provider"))?;
 
-        for provider in self.filtered_providers() {
+        // max thread count
+        let mut tmax = self.config.scan_threads as u32;
+        if tmax == 0 {
+            tmax = std::thread::available_parallelism().map_or(1, |v| v.get() as u32);
+        };
+        let mut tcount = AtomicU32::new(0);
 
-            tracing::debug!("[scan] scanning {}", &provider.name);
+        std::thread::scope(|s| {
 
-            let mut arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let arch_filter = if arch_filter.is_empty() { None } else { Some(arch_filter) };
-            let arch_filter = arch_filter.as_deref();
+            for provider in self.filtered_providers() {
 
-            let list = scan_result::Scan::scan(provider.as_provide(), arch_filter);
+                while tcount.load(std::sync::atomic::Ordering::SeqCst) >= tmax {
+                    // doesn't need to be any more sophisticated than a spin wait here
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
 
-            if let Ok(list) = list {
+                // incrment
+                tcount.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-                let pkg_count = list.packages.len();
-                let ver_count : usize = list.packages.iter().map(|pkg_info| pkg_info.1.versions.len()).sum();
-                tracing::debug!("[scan] {}: {} packages, {} versions", &provider.name, pkg_count, ver_count);
+                s.spawn(|| -> AResult<()> {
 
-                // write the package list to a cache file
-                let out = provider::ProviderFile {
-                    scan_time: now,
-                    packages: list,
-                };
+                    // decrement the thread counter upon drop
+                    let decr = AtomicDecrDrop{val: &tcount};
 
-                let s = serde_json::to_string_pretty(&out)?;
-                let mut file = File::create(&provider.cache_file)?;
-                file.write_all(s.as_bytes())?;
-            } else {
-                tracing::warn!("error while scanning {}: {}", &provider.name, list.unwrap_err());
-                let out = provider::ProviderFile {
-                    scan_time: now,
-                    packages: Default::default(),
-                };
-                let s = serde_json::to_string_pretty(&out)?;
-                let mut file = File::create(&provider.cache_file)?;
-                file.write_all(s.as_bytes())?;
+                    let tid = std::thread::current().id().as_u64();
+                    tracing::debug!("[scan] [t{}] scanning {}", tid, &provider.name);
+
+                    let mut arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
+                    let arch_filter = if arch_filter.is_empty() { None } else { Some(arch_filter) };
+                    let arch_filter = arch_filter.as_deref();
+
+                    let list = scan_result::Scan::scan(provider.as_provide(), arch_filter);
+
+                    if let Ok(list) = list {
+
+                        let pkg_count = list.packages.len();
+                        let ver_count : usize = list.packages.iter().map(|pkg_info| pkg_info.1.versions.len()).sum();
+                        tracing::debug!("[scan] [t{}] {}: {} packages, {} versions", tid, &provider.name, pkg_count, ver_count);
+
+                        // write the package list to a cache file
+                        let out = provider::ProviderFile {
+                            scan_time: now,
+                            packages: list,
+                        };
+
+                        let s = serde_json::to_string_pretty(&out)?;
+                        let mut file = File::create(&provider.cache_file)?;
+                        file.write_all(s.as_bytes())?;
+                    } else {
+                        tracing::warn!("[scan] [t{}] error while scanning {}: {}", tid, &provider.name, list.unwrap_err());
+                        let out = provider::ProviderFile {
+                            scan_time: now,
+                            packages: Default::default(),
+                        };
+                        let s = serde_json::to_string_pretty(&out)?;
+                        let mut file = File::create(&provider.cache_file)?;
+                        file.write_all(s.as_bytes())?;
+                    }
+                    Ok(())
+                });
             }
-        }
+        });
+
         Ok(())
     }
 
@@ -2408,3 +2438,16 @@ impl App {
 //    }
 
 } // impl App
+
+
+use std::sync::atomic::AtomicU32;
+
+struct AtomicDecrDrop<'a> {
+    val: &'a AtomicU32,
+}
+
+impl<'a> Drop for AtomicDecrDrop<'a> {
+    fn drop(&mut self) {
+        self.val.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}

@@ -9,6 +9,9 @@ auto_clean = true
 touch_on_uninstall = true
 fetch_jobs = 4
 
+[scan]
+threads = 0
+
 [mount]
 TARGET = { default = true, path = "${THIS}/crates/bpm/install/target" }
 TEST  = "${THIS}/crates/bpm/install/test"

@@ -43,6 +43,7 @@ pub struct Config {
     pub cache_fetch_jobs: u8,
     pub cache_touch_on_uninstall: bool,
     pub cache_auto_clean: bool,
+    pub scan_threads: u8,
     pub providers: Vec<Provider>,
     pub mount: MountConfig,
 }
@@ -123,6 +124,7 @@ pub struct ConfigToml {
     providers: indexmap::IndexMap<String, ProviderToml>,
     mount: HashMap<String, MountToml>,
     cache: CacheToml,
+    scan: Option<ScanToml>,
     arch: Option<ArchToml>,
 }
 
@@ -176,6 +178,13 @@ pub struct CacheToml {
     touch_on_uninstall: bool,
 
     fetch_jobs: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScanToml {
+
+    /// max number of threads to use, 0 means cpu count
+    threads: Option<u8>,
 }
 
 impl Config {
@@ -279,6 +288,7 @@ impl Config {
             cache_fetch_jobs,
             cache_auto_clean: toml.cache.auto_clean,
             cache_touch_on_uninstall: toml.cache.touch_on_uninstall,
+            scan_threads: toml.scan.and_then(|v| v.threads).unwrap_or(0),
             providers,
             mount : MountConfig {
                 default_target,
