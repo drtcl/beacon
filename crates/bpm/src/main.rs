@@ -54,14 +54,6 @@ fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
     }
 }
 
-//fn path_rewrite(mut path: String) -> String {
-//    let needles = ["<ROOT>", "<PWD>"];
-//    for needle in needles {
-//        path = path.replace(needle, "XX");
-//    }
-//    path
-//}
-
 /// search for the config file
 /// 1. bpm_config.toml next to the executable
 /// 2.     config.toml next to the executable
@@ -106,26 +98,6 @@ fn find_config_file() -> AResult<Utf8PathBuf> {
     Err(anyhow::anyhow!("cannot find config file"))
 }
 
-fn acquire_file_lock(path: &Utf8Path) -> AResult<std::fs::File> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path).context("opening lockfile")?;
-
-    if !file.try_lock().context("file lock")? {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        if !file.try_lock().context("file lock")? {
-            eprintln!("waiting for file lock");
-            file.lock().context("file lock")?;
-        }
-    }
-
-    //let file_lock = Some(file);
-    return Ok(file);
-}
-
 fn main() -> AResult<()> {
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -157,21 +129,10 @@ fn main() -> AResult<()> {
 
     // load the config file
     config::store_config_path(config_file.canonicalize_utf8().context("failed to canonicalize config path")?);
-    let mut app = App {
-        config: config::Config::from_path(config_file).context("reading config file")?,
-        db: db::Db::new(),
-        db_loaded: false,
-        provider_filter: provider::ProviderFilter::empty(),
-        arch_filter: vec!["".into()],
-    };
+    let config = config::Config::from_path(config_file).context("reading config file")?;
 
-    //TODO this is currently going to block things like parallel scans.
-    //should this be more fine grained?
-    let file_lock = if let Some(path) = &app.config.lockfile {
-        Some(acquire_file_lock(path)?)
-    } else {
-        None
-    };
+    // create main App struct
+    let mut app = App::new(config);
 
     match matches.subcommand() {
         Some(("cache", sub_matches)) => {
@@ -223,17 +184,10 @@ fn main() -> AResult<()> {
         }
         Some(("scan", sub_matches)) => {
 
-            let debounce = sub_matches.get_one::<String>("debounce");
-            let debounce : std::time::Duration = if let Some(s) = debounce {
-                if let Ok(s) = s.parse::<u64>() {
-                    std::time::Duration::from_secs(s)
-                } else if let Ok(d) = humantime::parse_duration(s) {
-                    d
-                } else {
-                    anyhow::bail!("invalid debounce time");
-                }
+            let debounce = if let Some(d) = sub_matches.get_one::<String>("debounce") {
+                Some(bpmutil::parse_duration_base(Some(d), std::time::Duration::from_secs(1))?)
             } else {
-                std::time::Duration::from_secs(0)
+                None
             };
 
             let arch = args::pull_many_opt(sub_matches, "arch");
@@ -357,21 +311,5 @@ fn main() -> AResult<()> {
         }
     }
 
-    drop(file_lock);
     Ok(())
 }
-
-//    //---
-//    let r = humantime::parse_duration("2d30s1ms");
-//    dbg!(&r);
-//    let d = r?;
-//    let d = std::time::Duration::from_secs(d.as_secs());
-//    let d = humantime::format_duration(d);
-//    println!("{}", d.to_string());
-//
-//    let now = chrono::Utc::now();
-//    let then = now + chrono::Duration::seconds(120) + chrono::Duration::milliseconds(123);
-//    let dur = then - now;
-//    let d = humantime::format_duration(dur.to_std()?);
-//    println!("{}", d.to_string());
-//    //---

@@ -11,6 +11,7 @@ fetch_jobs = 4
 
 [scan]
 threads = 0
+debounce = "30s"
 
 [mount]
 TARGET = { default = true, path = "${THIS}/crates/bpm/install/target" }

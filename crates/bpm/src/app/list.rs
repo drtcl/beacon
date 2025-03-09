@@ -55,6 +55,8 @@ impl App {
     /// list installed packages
     pub fn list_installed(&mut self, show_arch: bool) -> Result<()> {
 
+        self.shared_lock()?;
+
         // if the db file doesn't exist, dont' attempt to load it, return 0 packages
         if !self.db_file_exists() {
             return Ok(());
@@ -88,6 +90,8 @@ impl App {
     /// `bpm list channels`
     /// list channels for a given package, or all packages
     pub fn list_channels_cmd(&mut self, needle: Option<&String>, exact: bool, json: bool) -> Result<()> {
+
+        self.shared_lock()?;
 
         let mut combined = scan_result::ScanResult::default();
         for provider in self.filtered_providers() {
@@ -163,6 +167,8 @@ impl App {
         channels: Option<Vec<&String>>,
         show_arch: bool,
     ) -> Result<()> {
+
+        self.shared_lock()?;
 
         let mut combined = scan_result::ScanResult::default();
         for provider in self.filtered_providers() {

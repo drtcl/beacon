@@ -44,6 +44,7 @@ pub struct Config {
     pub cache_touch_on_uninstall: bool,
     pub cache_auto_clean: bool,
     pub scan_threads: u8,
+    pub scan_debounce: std::time::Duration,
     pub providers: Vec<Provider>,
     pub mount: MountConfig,
 }
@@ -185,6 +186,9 @@ pub struct ScanToml {
 
     /// max number of threads to use, 0 means cpu count
     threads: Option<u8>,
+
+    /// default --debounce value. example strings "20m" == "20min", "1h30m", "30s"
+    debounce: Option<String>,
 }
 
 impl Config {
@@ -208,6 +212,11 @@ impl Config {
         let cache_dir = path_replace(toml.cache.dir)?.full_path()?;
         let cache_retention = humantime::parse_duration(&toml.cache.retention).context("invalid cache retention")?;
         let cache_fetch_jobs = toml.cache.fetch_jobs.unwrap_or(1);
+
+        let scan_debounce = bpmutil::parse_duration_base(
+            toml.scan.as_ref().and_then(|x| x.debounce.as_ref()).map(|s| s.as_str()),
+            std::time::Duration::from_secs(1)
+        )?;
 
         let mut arch = toml.arch.map(|e| {
             match e {
@@ -289,6 +298,7 @@ impl Config {
             cache_auto_clean: toml.cache.auto_clean,
             cache_touch_on_uninstall: toml.cache.touch_on_uninstall,
             scan_threads: toml.scan.and_then(|v| v.threads).unwrap_or(0),
+            scan_debounce,
             providers,
             mount : MountConfig {
                 default_target,
@@ -297,6 +307,7 @@ impl Config {
         };
 
         //dbg!(&config);
+        //todo!();
 
         Ok(config)
     }

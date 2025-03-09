@@ -20,11 +20,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-//TODO lockfile more granular
 //TODO multiple paths for a provider
 //TODO dirs without write perms cause problems
 //TODO -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
 //
+//...
+//DONE config scan.debounce default --debounce value
+//DONE lockfile more granular
+//...
 //DONE threads for scanning multiple providers at a time
 //DONE config scan.threads
 //...
@@ -50,12 +53,14 @@ const TEMP_DOWNLOAD_PREFX : &str = "temp_download_";
 
 #[derive(Debug)]
 pub struct App {
-    pub config: config::Config,
-    pub db: db::Db,
-    pub db_loaded: bool,
+    config: config::Config,
+    db: db::Db,
+    db_loaded: bool,
 
     pub provider_filter: provider::ProviderFilter,
-    pub arch_filter: Vec<String>,
+    arch_filter: Vec<String>,
+
+    lockfile: Option<File>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -180,6 +185,56 @@ fn parse_pkg_arg(arg: &str) -> AResult<PkgArgType> {
 }
 
 impl App {
+
+    pub fn new(config: config::Config) -> Self {
+        Self {
+            config,
+            db: db::Db::new(),
+            db_loaded: false,
+            provider_filter: provider::ProviderFilter::empty(),
+            arch_filter: vec!["".into()],
+            lockfile: None,
+        }
+    }
+
+    pub fn exclusive_lock(&mut self) -> AResult<()> {
+
+        if self.lockfile.is_none() {
+            if let Some(path) = &self.config.lockfile {
+                let file = bpmutil::open_lockfile(path)?;
+                if !file.try_lock().context("file lock")? {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if !file.try_lock().context("file lock")? {
+                        eprintln!("waiting for file lock");
+                        file.lock().context("file lock")?;
+                    }
+                }
+                self.lockfile = Some(file);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn shared_lock(&mut self) -> AResult<()> {
+
+        if self.lockfile.is_none() {
+            if let Some(path) = &self.config.lockfile {
+                let file = bpmutil::open_lockfile(path)?;
+                if !file.try_lock_shared().context("file lock")? {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if !file.try_lock_shared().context("file lock")? {
+                        eprintln!("waiting for file lock");
+                        file.lock_shared().context("file lock")?;
+                    }
+                }
+                self.lockfile = Some(file);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn load_db(&mut self) -> AResult<()> {
 
         if self.db_loaded {
@@ -232,7 +287,9 @@ impl App {
     /// `bpm search`
     ///
     /// search each provider's cached package info, merge results, print latest versions
-    pub fn search_cmd(&self, pkg_name: &str, exact: bool) -> AResult<()> {
+    pub fn search_cmd(&mut self, pkg_name: &str, exact: bool) -> AResult<()> {
+
+        self.shared_lock()?;
 
         let mut results = self.search_results(pkg_name, exact)?;
 
@@ -548,6 +605,8 @@ impl App {
     /// install a package from a provider or directly from a file
     pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool, reinstall: bool) -> AResult<()> {
 
+        self.exclusive_lock()?;
+
         let trace_span = tracing::trace_span!("bpm install").entered();
 
         let mut pkg_file_path : Option<Utf8PathBuf> = None;
@@ -694,6 +753,9 @@ impl App {
     /// `bpm uninstall` or `bpm remove`
     /// uninstall a package
     pub fn uninstall_cmd(&mut self, pkg_name: &String, verbose: bool, remove_unowned: bool) -> AResult<()> {
+
+        self.exclusive_lock()?;
+
         // from the package name,
         // find all files that belong to this package from the db
 
@@ -962,6 +1024,8 @@ impl App {
     /// `bpm update`
     pub fn update_packages_cmd(&mut self, pkgs: &[&String]) -> AResult<()> {
 
+        self.exclusive_lock()?;
+
         // nothing to do if the db file doesn't exist yet, nothing to update
         if !self.db_file_exists() {
             return Ok(());
@@ -1071,6 +1135,8 @@ impl App {
     /// Pin a package to a channel or the currently installed version
     pub fn pin(&mut self, pkg_name: &str, channel: Option<&str>) -> AResult<()> {
 
+        self.exclusive_lock()?;
+
         if self.db_file_exists() {
             self.load_db()?;
             for pkg in &mut self.db.installed {
@@ -1092,6 +1158,8 @@ impl App {
     /// `bpm unpin`
     /// Unpin a package
     pub fn unpin(&mut self, pkg_name: &str) -> AResult<()> {
+
+        self.exclusive_lock()?;
 
         if self.db_file_exists() {
             self.load_db()?;
@@ -1116,6 +1184,9 @@ impl App {
     pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, restore_volatile: bool, verbose: bool, allow_mtime: bool) -> AResult<()>
         where S: AsRef<str>,
     {
+
+        self.exclusive_lock()?;
+
         tracing::trace!(restore=restore, restore_volatile=restore_volatile, "verify");
 
         // if the db file doesn't exist, dont' attempt to load it, return 0 packages
@@ -1401,6 +1472,8 @@ impl App {
     /// `bpm query owner <file>`
     pub fn query_owner(&mut self, file: &str) -> AResult<()> {
 
+        self.shared_lock()?;
+
         // canonicalize the first existing parent path
         let partial_canonicalize = |path: &Utf8Path| {
             for parent in path.ancestors().skip(1) {
@@ -1468,6 +1541,8 @@ impl App {
     /// `bpm query list-files <pkg>`
     pub fn query_files(&mut self, pkg_name: &str, depth: Option<u32>, absolute: bool, show_type: bool) -> AResult<()> {
 
+        self.shared_lock()?;
+
         let depth = depth.unwrap_or(0);
 
         let output = |root: &Utf8Path, path: &Utf8Path, info: &package::FileInfo| {
@@ -1517,6 +1592,8 @@ impl App {
 
     /// `bpm query kv`
     pub fn query_kv(&mut self, pkg_names: Option<&[&str]>, keys: Option<&[&str]>) -> AResult<()> {
+
+        self.shared_lock()?;
 
         let one_pkg = pkg_names.is_some() && pkg_names.unwrap().len() == 1;
         let one_key = keys.is_some() && keys.unwrap().len() == 1;
@@ -1629,6 +1706,8 @@ impl App {
     /// Read the KV from the provider cache file.
     pub fn query_kv_provider(&mut self, pkg_names: Option<&[&str]>, keys: Option<&[&str]>) -> AResult<()> {
 
+        self.shared_lock()?;
+
         let one_pkg = pkg_names.is_some() && pkg_names.unwrap().len() == 1;
         let one_key = keys.is_some() && keys.unwrap().len() == 1;
 
@@ -1692,15 +1771,21 @@ impl App {
     }
 
     /// `bpm scan`
-    pub fn scan_cmd(&self, debounce: std::time::Duration) -> AResult<()> {
+    pub fn scan_cmd(&mut self, debounce: Option<Duration>) -> AResult<()> {
 
-        tracing::trace!("scanning providers");
+        // This would normally be an exclusive lock because this modifies files.
+        // However, we're using a shared lock here and exclusive locks on the individual provider
+        // files to support running multiple processes doing scans in parrallel
+        self.shared_lock()?;
+
+        tracing::trace!("[scan] checking debounce times");
 
         let now = chrono::Utc::now().round_subsecs(0);
-        tracing::trace!("now                {:?}", now);
+        tracing::trace!("[scan] {:?} now", now);
 
         let mut skip_scan = true;
 
+        let debounce = debounce.unwrap_or(self.config.scan_debounce);
         if debounce.is_zero() {
             skip_scan = false;
         } else {
@@ -1712,17 +1797,17 @@ impl App {
                     if debounce_timepoint < now {
                         skip_scan = false;
                     }
-                    tracing::trace!("{:-18} {:?}", &provider.name, data.scan_time);
-                    tracing::trace!("debounce_timepoint {:?} {}", debounce_timepoint, tern!(now > debounce_timepoint, "scan!", "skip"));
+                    tracing::trace!("[scan] {:?} {}", data.scan_time, &provider.name);
+                    tracing::trace!("[scan] {:?} debounce_timepoint -- {}", debounce_timepoint, tern!(now > debounce_timepoint, "scan!", "skip"));
                 } else {
-                    tracing::trace!("error loading file, scanning");
+                    tracing::trace!("[scan] error loading file, scanning");
                     skip_scan = false;
                 }
             }
         }
 
         if skip_scan {
-            tracing::trace!("skipping scan");
+            tracing::trace!("[scan] debounce, skipping scan");
             return Ok(());
         }
 
@@ -1741,20 +1826,50 @@ impl App {
             for provider in self.filtered_providers() {
 
                 while tcount.load(std::sync::atomic::Ordering::SeqCst) >= tmax {
-                    // doesn't need to be any more sophisticated than a spin wait here
+                    // this doesn't need to be any more sophisticated than a spin wait
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
 
-                // incrment
+                // incrment active thread counter
                 tcount.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
                 s.spawn(|| -> AResult<()> {
 
-                    // decrement the thread counter upon drop
+                    let tid = std::thread::current().id().as_u64();
+
+                    // decrement the thread counter upon drop (when this thread is done)
                     let decr = AtomicDecrDrop{val: &tcount};
 
-                    let tid = std::thread::current().id().as_u64();
-                    tracing::debug!("[scan] [t{}] scanning {}", tid, &provider.name);
+                    let mut lock_path = provider.cache_file.clone();
+                    if let Some(e) = lock_path.extension() {
+                        lock_path = lock_path.with_extension(&format!("{}.lock", e));
+                    } else {
+                        lock_path = lock_path.with_extension(".lock");
+                    }
+
+                    let mut lock_contended = false;
+                    let lock_file = bpmutil::open_lockfile(&lock_path)?;
+                    if !lock_file.try_lock().context("file lock")? {
+                        lock_contended = true;
+                        tracing::debug!("[scan] [t{tid}] waiting for file lock");
+                        lock_file.lock().context("file lock")?;
+                    }
+
+                    // if the first attempt to get the lockfile failed, something else had the file
+                    // locked, likely another scan in parallel. Check if the file was just updated,
+                    // and skip the scan if so.
+                    if lock_contended {
+                        tracing::debug!("[scan] [t{tid}] lockfile was contended, checking if debounce is satisfied");
+                        if let Ok(data) = provider.load_file() {
+                            let debounce_timepoint = data.scan_time + tern!(debounce.is_zero(), Duration::from_secs(10), debounce);
+                            if now < debounce_timepoint {
+                                tracing::debug!("[scan] [t{tid}] detected concurrent scan with acceptable debounce, skipping scan");
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    tracing::debug!("[scan] [t{tid}] scanning {}", &provider.name);
 
                     let mut arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
                     let arch_filter = if arch_filter.is_empty() { None } else { Some(arch_filter) };
@@ -1767,6 +1882,8 @@ impl App {
                         let pkg_count = list.packages.len();
                         let ver_count : usize = list.packages.iter().map(|pkg_info| pkg_info.1.versions.len()).sum();
                         tracing::debug!("[scan] [t{}] {}: {} packages, {} versions", tid, &provider.name, pkg_count, ver_count);
+
+                        let now = chrono::Utc::now().round_subsecs(0);
 
                         // write the package list to a cache file
                         let out = provider::ProviderFile {
@@ -1788,9 +1905,11 @@ impl App {
                         file.write_all(s.as_bytes())?;
                     }
                     Ok(())
-                });
+
+                }); // spawn
             }
-        });
+
+        }); // end of thread scope, all threads are done
 
         Ok(())
     }
@@ -1826,6 +1945,8 @@ impl App {
     /// `bpm cache clean`
     /// Remove package files that have expired.
     pub fn cache_clean(&mut self) -> AResult<()> {
+
+        self.exclusive_lock()?;
 
         let retention = self.config.cache_retention;
 
@@ -1904,6 +2025,8 @@ impl App {
     /// Optionally including the package files that are "in use" (packages thats are currently installed).
     pub fn cache_clear(&mut self, in_use: bool) -> AResult<()> {
 
+        self.exclusive_lock()?;
+
         // it's okay if the db doesn't exist, then we won't preserve any in-use package files,
         // and none should be in use if the db doesn't exist.
         let _ = self.load_db();
@@ -1960,6 +2083,8 @@ impl App {
     /// Optionally removing package files that are "in use" (installed).
     pub fn cache_evict(&mut self, pkg: &str, version: Option<&String>, in_use: bool) -> AResult<()> {
 
+        self.exclusive_lock()?;
+
         // it's okay if the db doesn't exist, then we won't preserve any in-use package files,
         // and none should be in use if the db doesn't exist.
         let _ = self.load_db();
@@ -2013,6 +2138,8 @@ impl App {
 
     /// `bpm cache list`
     pub fn cache_list(&mut self) -> AResult<()> {
+
+        self.shared_lock()?;
 
         tracing::trace!("cache list");
 
@@ -2085,6 +2212,8 @@ impl App {
     /// or
     /// `bpm cache fetch /path/to/packagefile`
     pub fn cache_fetch(&mut self, pkgs: &[&String]) -> AResult<()> {
+
+        self.exclusive_lock()?;
 
         let pkg_name = pkgs[0].as_str();
 
@@ -2438,7 +2567,6 @@ impl App {
 //    }
 
 } // impl App
-
 
 use std::sync::atomic::AtomicU32;
 
