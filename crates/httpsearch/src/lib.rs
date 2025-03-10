@@ -25,8 +25,6 @@
 //!
 //!   T threads running J concurrent http requests
 
-#![feature(extract_if)]
-
 pub mod masync;
 
 #[cfg(all(feature="rustls", feature="nativessl"))]

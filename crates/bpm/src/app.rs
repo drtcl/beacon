@@ -20,10 +20,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 //TODO multiple paths for a provider
-//TODO dirs without write perms cause problems
 //TODO -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
 //
+//DONE dirs without write perms cause problems
 //...
 //DONE config scan.debounce default --debounce value
 //DONE lockfile more granular
@@ -454,18 +460,47 @@ impl App {
         ).unwrap());
         pbar.set_prefix(metadata.name.to_string());
 
+        #[cfg(unix)]
+        let mut ro_dirs = HashMap::new();
+
         // unpack all files individually
         for entry in data_tar.entries()? {
 
             let mut entry = entry?;
 
-            let installed_ok = entry.unpack_in(&install_dir_full)?;
+            let mode = entry.header().mode().unwrap();
 
             let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
-
-            pbar.set_message(String::from(path.as_str()));
+            //pbar.suspend(|| println!("{}", path));
 
             let installed_path = join_path_utf8!(&install_dir_full, &path);
+
+            // check if the parent dir is readonly,
+            // need to add write permission to be able to install files into the dir
+            #[cfg(unix)]
+            if let Some(parent_dir) = installed_path.parent() {
+                if !ro_dirs.contains_key(parent_dir) {
+                    ro_dirs.insert(parent_dir.to_path_buf(), None);
+                    if let Ok(md) = std::fs::metadata(&parent_dir) {
+
+                        let mut perms = md.permissions();
+                        let mut mode = perms.mode();
+
+                        if 0 == (mode & 0o200) {
+                            // user does not have write access
+                            ro_dirs.insert(parent_dir.to_path_buf(), Some(mode));
+
+                            mode |= 0o200;
+                            perms.set_mode(mode);
+                            std::fs::set_permissions(&parent_dir, perms)?;
+                        }
+                    }
+                }
+            }
+
+            let installed_ok = entry.unpack_in(&install_dir_full)?;
+
+            pbar.set_message(String::from(path.as_str()));
 
             // store the mtime
             if let Some(info) = metadata.files.get_mut(&path) {
@@ -482,7 +517,17 @@ impl App {
             }
 
             pbar.inc(1);
-            //pbar.suspend(|| println!("{}", path));
+        }
+
+        // restore the permissions on any readonly dir that was modified during installation
+        #[cfg(unix)]
+        for (dir, mode) in ro_dirs {
+            if let Some(mode) = mode {
+                let md = std::fs::metadata(&dir)?;
+                let mut perms = md.permissions();
+                perms.set_mode(mode);
+                std::fs::set_permissions(&dir, perms)?;
+            }
         }
 
         pbar.finish_and_clear();
@@ -735,6 +780,12 @@ impl App {
         } else {
             println!("Installing {pkg_name} {pkg_version}");
         }
+
+        //// cache touch the file now
+        //if let Some(filename) = cache_file.file_name() {
+        //    self.db.cache_touch(filename, None);
+        //    self.save_db();
+        //}
 
         let ret = if already_installed {
             self.update_inplace(&pkg_name, cache_file, versioning)
@@ -1402,10 +1453,37 @@ impl App {
 
         let mut dirs = Vec::new();
 
+        #[cfg(unix)]
+        let mut ro_dirs = HashMap::new();
+
         for (filepath, fileinfo) in files {
 
             let filepath = filepath.as_ref();
             let exists = matches!(filepath.try_exists(), Ok(true));
+
+            // check if the parent dir is readonly,
+            // need to add write permission to be able to remove files from the dir
+            #[cfg(unix)]
+            if exists && let Some(parent_dir) = filepath.parent() {
+                if !ro_dirs.contains_key(parent_dir) {
+                    ro_dirs.insert(parent_dir.to_path_buf(), None);
+                    if let Ok(md) = std::fs::metadata(&parent_dir) {
+
+                        let mut perms = md.permissions();
+                        let mut mode = perms.mode();
+
+                        if 0 == (mode & 0o200) {
+                            // user does not have write access
+                            ro_dirs.insert(parent_dir.to_path_buf(), Some(mode));
+
+                            mode |= 0o200;
+                            perms.set_mode(mode);
+                            std::fs::set_permissions(&parent_dir, perms)?;
+                        }
+                    }
+
+                }
+            }
 
             match &fileinfo.filetype {
                 package::FileType::Link(to) => {
@@ -1426,7 +1504,28 @@ impl App {
                 }
                 package::FileType::Dir => {
                     dirs.push(filepath.to_path_buf());
+
+                    #[cfg(windows)] {
+                        // the dir must not be readonly
+                        let md = std::fs::metadata(&filepath)?;
+                        if md.permissions().readonly() {
+                            let mut perms = md.permissions();
+                            perms.set_readonly(false);
+                            let _ = std::fs::set_permissions(filepath, perms);
+                        }
+                    }
                 }
+            }
+        }
+
+        // restore the permissions on any readonly dir that was modified during installation
+        #[cfg(unix)]
+        for (dir, mode) in ro_dirs {
+            if let Some(mode) = mode {
+                let md = std::fs::metadata(&dir)?;
+                let mut perms = md.permissions();
+                perms.set_mode(mode);
+                std::fs::set_permissions(&dir, perms)?;
             }
         }
 
@@ -1998,7 +2097,7 @@ impl App {
                     }
                 }
 
-                tracing::trace!(touch=?touch, in_use=in_use, "cache clean - {} {}", tern!(remove, "remove", "keep"), filename);
+                tracing::trace!(touch=?touch, in_use=in_use, "[cache clean] {} {}", tern!(remove, "remove", "keep"), filename);
 
                 if remove {
                     let ok = std::fs::remove_file(&path);
@@ -2422,7 +2521,7 @@ impl App {
         where T: Iterator<Item=&'a provider::Provider>,
     {
 
-        tracing::debug!(pkg=id.name, version=id.version, "cache fetch");
+        tracing::debug!(pkg=id.name, version=id.version, "[cache fetch]");
 
         // ensure that we have the cache/packages dir
         std::fs::create_dir_all(join_path_utf8!(&cache_dir, "packages")).context("failed to create cache/packages dir")?;

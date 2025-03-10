@@ -1,8 +1,6 @@
 #![feature(let_chains)]
 #![feature(iter_collect_into)]
 #![feature(io_error_more)]
-#![feature(extract_if)]
-#![feature(file_lock)]
 #![feature(iter_chain)]
 #![feature(thread_id_value)]
 
