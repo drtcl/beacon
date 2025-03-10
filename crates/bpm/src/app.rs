@@ -2576,6 +2576,9 @@ impl App {
     /// Directly copy a file into the cache dir
     pub fn cache_store_file(&self, path: &Utf8Path) -> AResult<Utf8PathBuf> {
 
+        // ensure that we have the cache/packages dir
+        std::fs::create_dir_all(join_path_utf8!(&self.config.cache_dir, "packages")).context("failed to create cache/packages dir")?;
+
         // check that the package file is not a path to a file in the cache dir
         // (do not copy in place)
 
