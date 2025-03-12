@@ -44,23 +44,6 @@ fn fake_package_list() -> PkgList {
     }
 }
 
-fn scan_pkgs(dir: &str) {
-    for file in walkdir::WalkDir::new(dir) {
-        if let Ok(file) = file {
-            if file.file_type().is_file() {
-                println!("{}", file.path().display());
-                let fname = file.path().file_name();
-                if let Some(fname) = fname {
-                    let fname = fname.to_string_lossy().to_string();
-                    if package::is_packagefile_name(&fname) {
-                        println!("** {}", fname);
-                    }
-                }
-            }
-        }
-    }
-}
-
 async fn handle404() -> (StatusCode, &'static str) {
     (StatusCode::NOT_FOUND, "Not Found")
 }
@@ -70,9 +53,6 @@ async fn main() {
 
     // initialize tracing
     tracing_subscriber::fmt::init();
-
-    scan_pkgs("pkg");
-    todo!();
 
     let pkg_list = Arc::new(fake_package_list());
 
@@ -89,7 +69,7 @@ async fn main() {
 
     // run our app with hyper
     // `axum::Server` is a re-export of `hyper::Server`
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3006));
     tracing::debug!("listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(routes.into_make_service())
@@ -100,7 +80,7 @@ async fn main() {
 // basic handler that responds with a static string
 #[tracing::instrument]
 async fn root() -> impl IntoResponse {
-    Html("<h1><a href=\"/pkg\">package list</a></h1>")
+    Html("<h1><a href=\"/pkg\">packages</a></h1>")
 }
 
 #[tracing::instrument]

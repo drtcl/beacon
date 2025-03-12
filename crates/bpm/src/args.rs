@@ -102,6 +102,7 @@ pub fn get_cli() -> Command {
                 .arg(arg!(--"no-pin" "Do not pin to a specific version. Package may immediately be a candidate for updating."))
                 .arg(arg!(-u --update "Install a different version of an already installed package. No effect if pkg is not already installed."))
                 .arg(arg!(--reinstall "Allow installing the same version again."))
+                .arg(arg!(-t --target <location> "Install into user specified <location>. Can be prefixed with \"MOUNT:\" to name a mount in the config file."))
                 .arg(providers_arg())
                 .arg(arch_arg())
         )

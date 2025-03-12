@@ -1,5 +1,6 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use camino::Utf8Path;
 use crate::AResult;
 use crate::provider::Provider;
 use serde::{Serialize, Deserialize};
@@ -61,9 +62,20 @@ pub struct MountConfig {
 
 #[derive(Debug)]
 pub enum MountPoint {
+
+    /// specified by the package itself
     Specified(PathType),
+
+    /// the default target
     Default(PathType),
+
+    /// specific by user at install time
+    User(PathType),
+
+    /// package tried to use default target, but default is disabled
     DefaultDisabled,
+
+    /// invalid mount, name not found
     Invalid {
         name: String,
     }
@@ -340,6 +352,44 @@ impl Config {
                 MountPoint::Invalid{name: name.to_string()}
             }
         }
+    }
+
+    pub fn get_mountpoint_user(&self, target: &str) -> MountPoint {
+
+        if let Some(name) = target.strip_prefix("MOUNT:") {
+            return self.get_mountpoint(Some(name));
+        }
+        if let Some(name) = target.strip_prefix("mount:") {
+            return self.get_mountpoint(Some(name));
+        }
+        if let Some(name) = target.strip_prefix("TARGET:") {
+            return self.get_mountpoint(Some(name));
+        }
+        if let Some(name) = target.strip_prefix("target:") {
+            return self.get_mountpoint(Some(name));
+        }
+
+        let partial_canonicalize = |path: &Utf8Path| -> Utf8PathBuf {
+            for parent in path.ancestors().skip(1) {
+                if let Ok(true) = parent.try_exists() {
+                    let rest = path.strip_prefix(parent);
+                    let parent = parent.canonicalize_utf8();
+                    if let (Ok(parent), Ok(rest)) = (parent, rest) {
+                        return crate::join_path_utf8!(parent, rest);
+                    }
+                    break;
+                }
+            }
+            return path.to_path_buf();
+        };
+
+        let mut path = Utf8PathBuf::from(target);
+        if !path.is_absolute() {
+            path = crate::join_path_utf8!(".", path);
+        }
+        path = partial_canonicalize(&path);
+
+        MountPoint::User(PathType::Absolute(path))
     }
 }
 

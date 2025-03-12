@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     let pkg = matches.get_one::<String>("pkg").map(|s| s.as_str());
     let arch = matches.get_one::<String>("arch").map(|s| s.as_str());
 
-    let arch = arch.as_ref().map(|s| std::slice::from_ref(s));
+    let arch = arch.as_ref().map(std::slice::from_ref);
     if let Some(a) = arch {
         for a in a {
             if !package::is_valid_arch(Some(a)) {

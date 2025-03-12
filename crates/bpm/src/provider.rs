@@ -171,9 +171,9 @@ impl ProviderFilter {
             // simply add all while filtering out excluded ones
 
             for p in providers {
-                if self.exclude.iter().any(|v| *v == p.name) {
+                if self.exclude.contains(&p.name) {
                     // excluded
-                } else if all || self.include.iter().any(|v| *v == p.name) {
+                } else if all || self.include.contains(&p.name) {
                     ret.push(p);
                 }
             }
@@ -198,7 +198,7 @@ impl ProviderFilter {
 
             if let Some(mut idx) = self.rest {
                 for p in providers {
-                    if self.exclude.iter().any(|v| *v == p.name) {
+                    if self.exclude.contains(&p.name) {
                         // excluded
                     } else if ret.iter().any(|v| v.name == p.name) {
                         // already added

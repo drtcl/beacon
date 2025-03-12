@@ -27,8 +27,11 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 
 //TODO multiple paths for a provider
-//TODO -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
+//TODO fastpath, pre-scan, pre-scan age limit, version it
+//TODO verify at cache time, store packagefile hash for quick verifies later
 //
+//DONE -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
+//...
 //DONE dirs without write perms cause problems
 //...
 //DONE config scan.debounce default --debounce value
@@ -377,19 +380,26 @@ impl App {
         Ok(merged_results)
     }
 
-    fn get_mountpoint_dir(&self, metadata: &package::MetaData) -> AResult<config::PathType> {
-        use config::MountPoint::*;
-        let mount_point = self.config.get_mountpoint(metadata.mount.as_deref());
+    fn get_mountpoint_dir(&self, metadata: &package::MetaData, user_target: Option<&String>) -> AResult<config::PathType> {
+
+        let mount_point = if let Some(target) = user_target {
+            self.config.get_mountpoint_user(target)
+        } else {
+            self.config.get_mountpoint(metadata.mount.as_deref())
+        };
+
+        use config::MountPoint;
         match mount_point {
-            Specified(mp) |
-            Default(mp) => Ok(mp),
-            DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
-            Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
+            MountPoint::Specified(mp) |
+            MountPoint::User(mp) |
+            MountPoint::Default(mp) => Ok(mp),
+            MountPoint::DefaultDisabled => anyhow::bail!("attempt to use default target, which is disabled"),
+            MountPoint::Invalid{name} => anyhow::bail!("package using an invalid mountpoint: {name}"),
         }
     }
 
     /// install a package from a local package file.
-    fn install_pkg_file(&mut self, file_path: Utf8PathBuf, versioning: Versioning) -> AResult<()> {
+    fn install_pkg_file(&mut self, file_path: Utf8PathBuf, versioning: Versioning, target: Option<&String>) -> AResult<()> {
 
         tracing::debug!("install_pkg_file {}", file_path);
 
@@ -433,7 +443,7 @@ impl App {
             anyhow::bail!("failed to installed {}, package file is corrupt. Package architecture file filename does not match package internal metadata.", pkg_name);
         }
 
-        let install_dir = self.get_mountpoint_dir(&metadata)?;
+        let install_dir = self.get_mountpoint_dir(&metadata, target)?;
         let install_dir_full = install_dir.full_path()?;
 
         // create the mount point dir if it doesn't exist
@@ -468,8 +478,6 @@ impl App {
 
             let mut entry = entry?;
 
-            let mode = entry.header().mode().unwrap();
-
             let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
             //pbar.suspend(|| println!("{}", path));
 
@@ -481,7 +489,7 @@ impl App {
             if let Some(parent_dir) = installed_path.parent() {
                 if !ro_dirs.contains_key(parent_dir) {
                     ro_dirs.insert(parent_dir.to_path_buf(), None);
-                    if let Ok(md) = std::fs::metadata(&parent_dir) {
+                    if let Ok(md) = std::fs::metadata(parent_dir) {
 
                         let mut perms = md.permissions();
                         let mut mode = perms.mode();
@@ -492,7 +500,7 @@ impl App {
 
                             mode |= 0o200;
                             perms.set_mode(mode);
-                            std::fs::set_permissions(&parent_dir, perms)?;
+                            std::fs::set_permissions(parent_dir, perms)?;
                         }
                     }
                 }
@@ -648,7 +656,7 @@ impl App {
     /// or `bpm install foo@1.2.3`
     /// or `bpm install path/to/foo_1.2.3.bpm`
     /// install a package from a provider or directly from a file
-    pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool, reinstall: bool) -> AResult<()> {
+    pub fn install_cmd(&mut self, pkg_name_or_filepath: &str, no_pin: bool, update: bool, reinstall: bool, target: Option<&String>) -> AResult<()> {
 
         self.exclusive_lock()?;
 
@@ -790,7 +798,7 @@ impl App {
         let ret = if already_installed {
             self.update_inplace(&pkg_name, cache_file, versioning)
         } else {
-            self.install_pkg_file(cache_file, versioning)
+            self.install_pkg_file(cache_file, versioning, target)
         };
 
         if self.config.cache_auto_clean {
@@ -1464,24 +1472,21 @@ impl App {
             // check if the parent dir is readonly,
             // need to add write permission to be able to remove files from the dir
             #[cfg(unix)]
-            if exists && let Some(parent_dir) = filepath.parent() {
-                if !ro_dirs.contains_key(parent_dir) {
-                    ro_dirs.insert(parent_dir.to_path_buf(), None);
-                    if let Ok(md) = std::fs::metadata(&parent_dir) {
+            if exists && let Some(parent_dir) = filepath.parent() && !ro_dirs.contains_key(parent_dir) {
+                ro_dirs.insert(parent_dir.to_path_buf(), None);
+                if let Ok(md) = std::fs::metadata(parent_dir) {
 
-                        let mut perms = md.permissions();
-                        let mut mode = perms.mode();
+                    let mut perms = md.permissions();
+                    let mut mode = perms.mode();
 
-                        if 0 == (mode & 0o200) {
-                            // user does not have write access
-                            ro_dirs.insert(parent_dir.to_path_buf(), Some(mode));
+                    if 0 == (mode & 0o200) {
+                        // user does not have write access
+                        ro_dirs.insert(parent_dir.to_path_buf(), Some(mode));
 
-                            mode |= 0o200;
-                            perms.set_mode(mode);
-                            std::fs::set_permissions(&parent_dir, perms)?;
-                        }
+                        mode |= 0o200;
+                        perms.set_mode(mode);
+                        std::fs::set_permissions(parent_dir, perms)?;
                     }
-
                 }
             }
 
@@ -1941,7 +1946,7 @@ impl App {
 
                     let mut lock_path = provider.cache_file.clone();
                     if let Some(e) = lock_path.extension() {
-                        lock_path = lock_path.with_extension(&format!("{}.lock", e));
+                        lock_path = lock_path.with_extension(format!("{}.lock", e));
                     } else {
                         lock_path = lock_path.with_extension(".lock");
                     }

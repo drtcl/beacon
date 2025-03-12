@@ -201,12 +201,13 @@ fn main() -> AResult<()> {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
             let update = sub_matches.get_flag("update");
             let reinstall = sub_matches.get_flag("reinstall");
+            let target = sub_matches.get_one::<String>("target");
 
             let arch = args::pull_many_opt(sub_matches, "arch");
             app.setup_arch_filter(arch);
 
             app.provider_filter = args::parse_providers(sub_matches);
-            app.install_cmd(pkg_name, no_pin, update, reinstall)?;
+            app.install_cmd(pkg_name, no_pin, update, reinstall, target)?;
         }
         Some(("uninstall", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
