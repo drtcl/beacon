@@ -26,10 +26,15 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+//TODO smartstring
+//TODO faster json parsing
 //TODO multiple paths for a provider
 //TODO fastpath, pre-scan, pre-scan age limit, version it
-//TODO verify at cache time, store packagefile hash for quick verifies later
+//TODO progress interface
+//TODO non-interactive/as-child-process progress reporting
 //
+//DONE verify at cache time, store packagefile hash for quick verifies later
+//...
 //DONE -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
 //...
 //DONE dirs without write perms cause problems
@@ -399,11 +404,16 @@ impl App {
     }
 
     /// install a package from a local package file.
-    fn install_pkg_file(&mut self, file_path: Utf8PathBuf, versioning: Versioning, target: Option<&String>) -> AResult<()> {
+    fn install_pkg_file(&mut self, file_path: Utf8PathBuf, package_hash: Option<String>, versioning: Versioning, target: Option<&String>) -> AResult<()> {
 
         tracing::debug!("install_pkg_file {}", file_path);
 
-        let package_file_filename = file_path.file_name().context("invalid filename")?;
+        let now = std::time::Instant::now(); // TODO dd
+
+        let package_file_filename = file_path.file_name().context("package file has no filename")?;
+        let package_hash = package_hash.or_else(|| {
+            self.db.cache_get_hash(package_file_filename)
+        });
 
         let pkg_name;
         let pkg_version;
@@ -421,13 +431,14 @@ impl App {
 
         // open the package file and get the metadata
         let mut file = File::open(&file_path).context("failed to open package file")?;
-        //let mut metadata = package::get_metadata(&mut file).context("error reading metadata")?;
 
-        // make sure the checksum matches
-        let (ok, mut metadata) = package::package_integrity_check(&mut file)?;
-        if !ok {
+        // verify packagefile integrity
+        let check = package::package_integrity_check_full(&mut file, Some(package_file_filename), package_hash.as_deref());
+        if check.is_err() || !check.unwrap().good() {
             anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
         }
+
+        let mut metadata = package::get_metadata(&mut file).context("error reading metadata")?;
 
         // package filename must match package metadata
         // name must match
@@ -554,6 +565,8 @@ impl App {
         self.save_db()?;
 
         println!("Installation complete");
+
+        println!("install {:?}", now.elapsed()); //TODO dd
 
         Ok(())
     }
@@ -693,6 +706,8 @@ impl App {
         // check if this package is already installed
         // gather info about the current installation
         let current_install = self.db.installed.iter().find(|p| p.metadata.name.as_str() == pkg_name);
+        let current_install = current_install.cloned();
+        let current_install = current_install.as_ref();
         let already_installed = current_install.is_some();
 
         let current_version : Option<&str> = current_install.map(|v| v.metadata.version.as_str());
@@ -772,12 +787,20 @@ impl App {
             arch: pkg_arch,
         };
 
-        let cache_file = if let Some(path) = pkg_file_path {
+        let (is_new, cache_file, package_hash) = if let Some(path) = pkg_file_path {
             self.cache_store_file(&path)?
         } else {
             //println!("Fetching {pkg_name} {pkg_version}");
             self.cache_package_require(&id)?
         };
+
+        // insert the package file into cache
+        if is_new {
+            if let Some(filename) = cache_file.file_name() {
+                self.db.cache_insert(filename, package_hash.clone(), None);
+                self.save_db()?;
+            }
+        }
 
         if already_installed {
             if reinstall {
@@ -789,16 +812,10 @@ impl App {
             println!("Installing {pkg_name} {pkg_version}");
         }
 
-        //// cache touch the file now
-        //if let Some(filename) = cache_file.file_name() {
-        //    self.db.cache_touch(filename, None);
-        //    self.save_db();
-        //}
-
         let ret = if already_installed {
-            self.update_inplace(&pkg_name, cache_file, versioning)
+            self.update_inplace(&pkg_name, cache_file, package_hash, versioning)
         } else {
-            self.install_pkg_file(cache_file, versioning, target)
+            self.install_pkg_file(cache_file, package_hash, versioning, target)
         };
 
         if self.config.cache_auto_clean {
@@ -855,23 +872,28 @@ impl App {
     }
 
     /// install a different version of a package in-place (on top of) the existing version
-    fn update_inplace(&mut self, pkg_name: &str, new_pkg_file: Utf8PathBuf, versioning: Versioning) -> AResult<()> {
+    fn update_inplace(&mut self, pkg_name: &str, new_pkg_file: Utf8PathBuf, package_hash: Option<String>, versioning: Versioning) -> AResult<()> {
 
-        let cache_file = &new_pkg_file;
-        tracing::trace!("update_inplace {cache_file:?}");
+        tracing::trace!("update_inplace {:?}", new_pkg_file);
 
-        let mut new_package_fd = std::fs::File::open(cache_file)?;
+        let package_file_filename = new_pkg_file.file_name().context("package has no filename")?;
+        let package_hash = package_hash.or_else(|| {
+            self.db.cache_get_hash(package_file_filename)
+        });
 
-        //// make sure the checksum matches
-        let (ok, new_metadata) = package::package_integrity_check(&mut new_package_fd)?;
-        if !ok {
+        let mut new_package_fd = std::fs::File::open(&new_pkg_file)?;
+
+        // verify packagefile integrity
+        let check = package::package_integrity_check_full(&mut new_package_fd, Some(package_file_filename), package_hash.as_deref());
+        if check.is_err() || !check.unwrap().good() {
             anyhow::bail!("failed to install {}, package file failed integrity check", pkg_name);
         } else {
             tracing::trace!("package integrity check pass");
         }
 
+        let mut new_metadata = package::get_metadata(&mut new_package_fd).context("error reading metadata")?;
+
         let new_files = new_metadata.files.clone();
-        //dbg!(&new_files.keys());
 
         // gather info about the old package (the currently installed version)
         let current_pkg_info = self.db.installed.iter().find(|e| e.metadata.name == pkg_name).context("package is not currently installed")?;
@@ -1058,20 +1080,16 @@ impl App {
         let mut details = db::DbPkg::new(new_metadata);
         details.location = Some(location);
         details.versioning = versioning;
-        let pkg_filename = new_pkg_file.file_name().map(str::to_string);
-        details.package_file_filename = pkg_filename;
+        details.package_file_filename = Some(String::from(package_file_filename));
 
         self.db.add_package(details);
+        self.db.cache_touch(package_file_filename, None);
+        self.db.cache_unuse_all_versions(pkg_name);
+        self.db.cache_set_in_use(package_file_filename, true);
 
-        if let Some(filename) = new_pkg_file.file_name() {
-            self.db.cache_touch(filename, None);
-            self.db.cache_unuse_all_versions(pkg_name);
-            self.db.cache_set_in_use(filename, true);
-
-            if self.config.cache_touch_on_uninstall {
-                if let Some(filename) = old_package_filename {
-                    self.db.cache_touch(&filename, None);
-                }
+        if self.config.cache_touch_on_uninstall {
+            if let Some(package_file_filename) = old_package_filename {
+                self.db.cache_touch(&package_file_filename, None);
             }
         }
 
@@ -1149,7 +1167,9 @@ impl App {
         }
 
         if updates2.iter().any(|(_name, _version, _listing, _versioning, cache_file)| cache_file.is_none()) {
+
             println!("Fetching Packages");
+
             for (name, oldv, listing, versioning, cache_file) in &mut updates2 {
                 if cache_file.is_none() {
                     let ret = self.cache_package_require(&PackageID{
@@ -1157,8 +1177,18 @@ impl App {
                         version: listing.version.to_string(),
                         arch: listing.arch.clone(),
                     });
-                    if let Ok(path) = ret {
+
+                    if let Ok((is_new, path, hash)) = ret {
+
+                        // if the new package file is new, insert into the cache
+                        if is_new {
+                            if let Some(filename) = path.file_name() {
+                                self.db.cache_insert(filename, hash, None);
+                            }
+                        }
+
                         *cache_file = Some(path);
+
                     } else {
                         println!("failed to fetch {} {}, skipping", name, listing.version);
                     }
@@ -1173,7 +1203,7 @@ impl App {
         for (name, oldv, listing, versioning, cache_file) in updates2 {
             if let Some(path) = cache_file {
                 println!("Updating {} {} -> {}", name, oldv, listing.version);
-                self.update_inplace(&name, path, versioning)?;
+                self.update_inplace(&name, path, None, versioning)?;
                 count += 1;
             }
         }
@@ -1395,21 +1425,20 @@ impl App {
             //println!("restore_files {:?}", restore_files);
             if restore && !restore_files.is_empty() {
 
-                let path = self.cache_package_require(&PackageID{
+                let (is_new, path, hash) = self.cache_package_require(&PackageID{
                     name: pkg.metadata.name.clone(),
                     version: pkg.metadata.version.clone(),
                     arch: pkg.metadata.arch.clone(),
                 }).context("could not find package file")?;
 
                 if let Some(filename) = path.file_name() {
-                    new_cache_files.push(filename.to_owned());
+                    new_cache_files.push((filename.to_owned(), hash, is_new));
                 }
 
                 let cache_file = std::fs::File::open(path).context("reading cached package file")?;
 
                 // TODO potential to get a different package here
-                // Should check that the meta data and data hash are the same
-                // as the ones in the db (the installed version)
+                // could check that the meta data and data hash are the same as the ones in the db (the installed version)
 
                 let mut outer_tar = tar::Archive::new(&cache_file);
                 let (mut data_file, _size) = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut outer_tar)?;
@@ -1442,8 +1471,12 @@ impl App {
             }
         }
 
-        for filename in new_cache_files {
-            self.db.cache_touch(&filename, None);
+        for (filename, hash, is_new) in new_cache_files {
+            if is_new {
+                self.db.cache_insert(&filename, hash, None);
+            } else {
+                self.db.cache_touch(&filename, None);
+            }
             self.db.cache_set_in_use(&filename, true);
         }
         self.save_db()?;
@@ -2022,7 +2055,7 @@ impl App {
     /// any previous runs that were killed while downloading
     fn clear_temp_downloads(cache_dir: &Utf8Path) {
 
-        if let Ok(files) = std::fs::read_dir(cache_dir) {
+        if let Ok(files) = std::fs::read_dir(join_path_utf8!(cache_dir, "packages")) {
             for file in files.flatten() {
                 let typ = file.file_type();
                 let path = Utf8Path::from_path(file.path().as_path()).map(Utf8Path::to_path_buf);
@@ -2328,19 +2361,34 @@ impl App {
 
         // --- first, do any that are direct file paths ---
 
+        let mut error_count = 0;
+
         let filepaths : Vec<_> = pkg_args.extract_if(.., |arg| matches!(arg, PkgArgType::Filepath{..})).collect();
         for f in filepaths {
             match f {
                 PkgArgType::Filepath { path, name, version, arch } => {
                     //println!("   copy {}", path);
                     tracing::info!("cache copy {}", path);
-                    self.cache_store_file(&path)?;
-                    let _ = self.cache_touch(&name, Some(&version.to_string()), None);
+                    if let Ok((did_cache, cache_path, hash)) = self.cache_store_file(&path) {
+                        // don't want to insert a new cache entry if the package wasn't actually
+                        // copied to the cache, this can happen if the given file path is a path
+                        // inside the cache dir.
+                        if did_cache {
+                            if let Some(filename) = cache_path.file_name() {
+                                self.db.cache_insert(filename, hash, None);
+                            } else {
+                                tracing::warn!("filepath {} had no filename", cache_path);
+                            }
+                        }
+                    } else {
+                        error_count += 1;
+                    }
                 }
                 PkgArgType::Unversioned(..) |
                 PkgArgType::Versioned(..) => {}
             }
         }
+
 
         // --- second, do any that are coming from a provider ---
 
@@ -2372,12 +2420,13 @@ impl App {
         //total_bar.enable_steady_tick(Duration::from_secs(1));
         //let total_bar = bars.add(total_bar);
 
-        let jobs = std::cmp::min(self.config.cache_fetch_jobs as usize, ids.len());
+        let mut jobs = std::cmp::max(1, self.config.cache_fetch_jobs as usize);
+        jobs = std::cmp::min(jobs, ids.len());
 
         let ids = Mutex::new(ids);
         let mut touch : Mutex<Vec<_>> = Mutex::new(Vec::new());
 
-        let mut had_error = std::sync::atomic::AtomicBool::new(false);
+        let mut error_count = std::sync::atomic::AtomicU32::new(error_count);
 
         std::thread::scope(|s| {
             for _tid in 0..jobs {
@@ -2385,7 +2434,7 @@ impl App {
                 let cache_dir = &self.config.cache_dir;
                 let providers = &providers;
                 let bars = &bars;
-                let had_error = &had_error;
+                let error_count = &error_count;
                 //let total_bar = &total_bar;
                 let touch = &touch;
                 let _t = s.spawn(move || {
@@ -2394,13 +2443,15 @@ impl App {
                             None => { break; },
                             Some(id) => id
                         };
-                        if let Ok(cache_path) = Self::mt_cache_package_require(providers, cache_dir, &id, bars) {
+                        if let Ok((is_new, cache_path, hash)) = Self::mt_cache_package_require(providers, cache_dir, &id, bars) {
                             tracing::trace!("cache fetched {}", cache_path);
-                            touch.lock().unwrap().push(cache_path);
+                            if is_new {
+                                touch.lock().unwrap().push((cache_path, hash));
+                            }
                         } else {
-                            tracing::warn!("failed to fetched {}", id.name);
+                            tracing::warn!("failed to fetch {}", id.name);
                             eprintln!("failed to fetch {}@{}", id.name, id.version);
-                            had_error.store(true, std::sync::atomic::Ordering::SeqCst);
+                            error_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
                 });
@@ -2409,15 +2460,16 @@ impl App {
 
         //total_bar.finish_and_clear();
 
-        for path in touch.into_inner().unwrap() {
+        for (path, hash) in touch.into_inner().unwrap() {
             if let Some(fname) = path.file_name() {
-                self.db.cache_touch(fname, Some(self.config.cache_retention));
+                self.db.cache_insert(fname, hash, None);
             }
         }
         self.save_db()?;
 
-        if had_error.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("failed to fetch a package");
+        let error_count = error_count.into_inner();
+        if error_count > 0 {
+            return Err(anyhow::anyhow!("failed to fetch {} package{}", error_count, tern!(error_count == 1, "", "s")));
         }
 
         Ok(())
@@ -2426,6 +2478,7 @@ impl App {
     /// `bpm cache touch`
     pub fn cache_touch(&mut self, pkg: &str, version: Option<&String>, duration: Option<std::time::Duration>) -> AResult<()> {
 
+        self.exclusive_lock()?;
         self.load_db()?;
 
         tracing::trace!(pkg, version, duration=?duration, "cache touch");
@@ -2499,30 +2552,53 @@ impl App {
         None
     }
 
-    /// LOOKUP a package in the cache OR FETCH a package and cache it.
-    fn cache_package_require(&self, id: &PackageID) -> AResult<Utf8PathBuf> {
-        let cached_file = match self.cache_package_lookup(id) {
-            Some(cached_file) => cached_file,
-            None => self.cache_fetch_cmd(id)?,
-        };
-        Ok(cached_file)
+    /// LOOKUP a package in the cache
+    /// OR FETCH a package and cache it.
+    fn cache_package_require(&self, id: &PackageID) -> AResult<(bool, Utf8PathBuf, Option<String>)> {
+        match self.cache_package_lookup(id) {
+            Some(cached_file) => Ok((false, cached_file, None)),
+            None => {
+                let (cache_file, hash) = self.cache_fetch_cmd(id)?;
+                Ok((true, cache_file, hash))
+            }
+        }
     }
 
-    /// LOOKUP a package in the cache OR FETCH a package and cache it.
-    fn mt_cache_package_require(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf> {
-        let cached_file = match Self::mt_cache_package_lookup(cache_dir, id) {
-            Some(cached_file) => cached_file,
-            None => Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?,
-        };
-        Ok(cached_file)
+    /// LOOKUP a package in the cache
+    /// OR FETCH a package and cache it.
+    ///
+    /// returns (is_new, cache_path, pkg_hash)
+    fn mt_cache_package_require(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<(bool, Utf8PathBuf, Option<String>)> {
+        match Self::mt_cache_package_lookup(cache_dir, id) {
+            Some(cached_file) => Ok((false, cached_file, None)),
+            None => {
+                let (cache_file, hash) = Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?;
+                Ok((true, cache_file, hash))
+            }
+        }
     }
 
-    fn mt_cache_fetch_cmd(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf> {
+//    fn mt_cache_package_require(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf> {
+//        let cached_file = match Self::mt_cache_package_lookup(cache_dir, id) {
+//            Some(cached_file) => cached_file,
+//            None => Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?,
+//        };
+//        Ok(cached_file)
+//    }
+//
+//    fn mt_cache_fetch_cmd(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf> {
+//        Self::mt_cache_fetch_cmd2(providers.iter().copied(), cache_dir, id, bars)
+//    }
+
+    // returns (cache_path, pkg_hash)
+    fn mt_cache_fetch_cmd(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<(Utf8PathBuf, Option<String>)> {
         Self::mt_cache_fetch_cmd2(providers.iter().copied(), cache_dir, id, bars)
     }
 
     // note: this does not error on the first failure, it will try another provider
-    fn mt_cache_fetch_cmd2<'a, T>(providers: T, cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf>
+    //
+    // returns (cache_path, pkg_hash)
+    fn mt_cache_fetch_cmd2<'a, T>(providers: T, cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<(Utf8PathBuf, Option<String>)>
         where T: Iterator<Item=&'a provider::Provider>,
     {
 
@@ -2543,31 +2619,58 @@ impl App {
 
                             tracing::debug!(uri=info.uri, "[cache fetch] trying");
 
+                            let final_path = join_path_utf8!(&cache_dir, "packages", &info.filename);
+
                             let rand_str = Alphanumeric.sample_string(&mut rand::thread_rng(), 6);
-                            let temp_name = format!("{}{}_{}_{}_{}", TEMP_DOWNLOAD_PREFX, &id.name, &id.version.to_string(), std::process::id(), rand_str);
-                            let temp_path = join_path_utf8!(&cache_dir, &temp_name);
-                            let mut file = File::create(&temp_path)?;
+                            let temp_path = final_path.with_file_name(format!("{}{}_{}.fetch", TEMP_DOWNLOAD_PREFX, rand_str, &info.filename));
+
+                            let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).truncate(true).open(&temp_path)?;
 
                             if let Ok(true) = file.try_lock() {
                                 // good
                             } else {
-                                tracing::warn!("couldn't get lock on temp download file {}", temp_name);
+                                tracing::warn!("could not acquire lock on temp download file {}", temp_path);
                             }
-
-                            let final_path = join_path_utf8!(&cache_dir, "packages", &info.filename);
 
                             let result = provider.as_provide().fetch(&mut file, id, &info.uri, Some(bars));
                             match result {
-                                Err(ref _e) => { tracing::warn!(uri=info.uri, "fetch failed"); }
-                                Ok(_v)      => { tracing::debug!(uri=info.uri, "fetch success"); }
+                                Err(ref _e) => { tracing::warn!(uri=info.uri, "[cache fetch] fetch failed"); }
+                                Ok(_v)      => { tracing::debug!(uri=info.uri, "[cache fetch] fetch success"); }
                             }
-                            if result.is_ok() {
-                                file.sync_all()?;
-                                drop(file);
+
+                            let mut err = result.is_err();
+                            if !err { err = file.sync_all().is_err(); }
+                            if !err { err = file.rewind().is_err(); }
+
+                            // the packagefile's hash, to be inserted into the cache for faster verification later
+                            let mut hash = None;
+
+                            if !err {
+
+                                // integrity check the package
+                                let check = package::package_integrity_check_full(&mut file, Some(&info.filename), None);
+                                //TODO this creates a progress bar that isn't int he multibars
+
+                                if let Ok(check) = check && check.good() {
+                                    // good!
+                                    tracing::trace!("[cache fetch] integrity check good {}", info.filename);
+                                    hash = Some(check.file_hash);
+                                } else {
+                                    tracing::trace!("[cache fetch] integrity check fail {}", info.filename);
+                                    // delete temp file and return error
+                                    drop(file);
+                                    let _ = std::fs::remove_file(&temp_path);
+                                    err = true;
+                                }
+                            }
+
+                            if !err {
                                 tracing::trace!("moving fetched package file from {} to {}", temp_path, final_path);
-                                std::fs::rename(&temp_path, &final_path).context("failed to move file")?;
-                                //println!("final_path {:?}", final_path);
-                                return Ok(final_path);
+                                err = std::fs::rename(&temp_path, &final_path).context("failed to move file").is_err();
+                            }
+
+                            if !err {
+                                return Ok((final_path, hash));
                             }
                         }
                     }
@@ -2579,7 +2682,9 @@ impl App {
     }
 
     /// Directly copy a file into the cache dir
-    pub fn cache_store_file(&self, path: &Utf8Path) -> AResult<Utf8PathBuf> {
+    ///
+    /// returns (did_copy, cached_path, packagefile_hash)
+    pub fn cache_store_file(&self, path: &Utf8Path) -> AResult<(bool, Utf8PathBuf, Option<String>)> {
 
         // ensure that we have the cache/packages dir
         std::fs::create_dir_all(join_path_utf8!(&self.config.cache_dir, "packages")).context("failed to create cache/packages dir")?;
@@ -2589,6 +2694,7 @@ impl App {
 
         let filename = path.file_name().context("path has no filename")?;
         let cache_path = join_path_utf8!(&self.config.cache_dir, "packages", filename);
+        let temp_path = cache_path.with_file_name(format!("{}_{}.move", TEMP_DOWNLOAD_PREFX, filename));
 
         let in_cache_dir = {
             let cache_path = cache_path.canonicalize_utf8().ok();
@@ -2597,34 +2703,55 @@ impl App {
             path == cache_path
         };
 
-        if !in_cache_dir {
-
-            // copy to the cache dir
-            tracing::trace!("copying {} to {}", path, cache_path);
-
-            let filesize = get_filesize(cache_path.as_str()).ok().unwrap_or(0);
-            let pbar = indicatif::ProgressBar::new(filesize);
-            pbar.set_style(indicatif::ProgressStyle::with_template(
-                #[allow(clippy::literal_string_with_formatting_args)]
-                " {spinner:.green} caching package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
-            ).unwrap());
-
-            std::io::copy(
-                &mut File::open(path)?,
-                &mut pbar.wrap_write(&mut File::create(&cache_path)?)
-            ).context("failed to copy package file into cache")?;
-
-            pbar.finish_and_clear();
-
-            // TODO could validate the package here, and remove it if it fails
+        if in_cache_dir {
+            return Ok((false, cache_path, None));
         }
 
-        Ok(cache_path)
+        // copy to the cache dir
+        tracing::trace!("copying {} to {}", path, temp_path);
+
+        let filesize = get_filesize(path.as_str()).ok().unwrap_or(0);
+        let pbar = indicatif::ProgressBar::new(filesize);
+        pbar.set_style(indicatif::ProgressStyle::with_template(
+            #[allow(clippy::literal_string_with_formatting_args)]
+            " {spinner:.green} caching package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
+        ).unwrap());
+
+        std::io::copy(
+            &mut File::open(path)?,
+            &mut pbar.wrap_write(&mut File::create(&temp_path)?)
+        ).context("failed to copy package file into cache")?;
+
+        pbar.finish_and_clear();
+
+        // integrity check the package
+        let mut file = std::fs::File::open(&temp_path)?;
+        let check = package::package_integrity_check_full(&mut file, Some(filename), None);
+
+        // the packagefile's hash, to be inserted into the cache for faster verification later
+        let hash;
+
+        if let Ok(check) = check && check.good() {
+            // good!
+            tracing::trace!("integrity check good {}", filename);
+            hash = Some(check.file_hash);
+        } else {
+            tracing::trace!("integrity check fail {}", filename);
+            // delete temp file and return error
+            let _ = std::fs::remove_file(&temp_path);
+            anyhow::bail!("package integrity check failed, rejecting package");
+        }
+
+        tracing::trace!("moving {} to {}", temp_path, cache_path);
+        std::fs::rename(&temp_path, &cache_path).context("rename file")?;
+
+        Ok((true, cache_path, hash))
     }
 
     /// fetch a package by name AND version.
     /// network: yes
-    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<Utf8PathBuf> {
+    ///
+    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<(Utf8PathBuf, Option<String>)> {
         Self::mt_cache_fetch_cmd2(self.filtered_providers(), &self.config.cache_dir, id, &MultiProgress::new())
     }
 

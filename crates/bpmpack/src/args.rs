@@ -27,6 +27,11 @@ pub fn build_cli(cmd: clap::Command) -> clap::Command {
                 .arg(arg!(--semver "Require the version to be a valid semver [see http://semver.org]"))
         )
         .subcommand(
+            Command::new("verify")
+                .about("Verify package integrity")
+                .arg(arg!(<pkgfile> "package file to inspect"))
+        )
+        .subcommand(
             Command::new("list-files")
                 .alias("list")
                 .about("list the files contained in a package file")

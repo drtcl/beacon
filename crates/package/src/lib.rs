@@ -309,7 +309,12 @@ impl MetaData {
     }
 
     pub fn from_reader<R: Read>(r: &mut R) -> Result<Self> {
+        #[cfg(feature="sonic_json")]
+        let ret: Self = sonic_rs::from_reader(r)?;
+
+        #[cfg(not(feature="sonic_json"))]
         let ret: Self = serde_json::from_reader(r)?;
+
         Ok(ret)
     }
 
@@ -342,6 +347,186 @@ pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> R
         //}
     }
     Err(anyhow::anyhow!("path {} not found in tar archive", needle))
+}
+
+#[derive(Default, Debug)]
+pub struct CheckResult {
+    pub file_hash: String,
+    pub data_hash: String,
+    //hash_alg: &'static str,
+    meta_ok: bool,
+    data_ok: bool,
+    files_ok: bool,
+    name_ok: bool,
+}
+
+impl CheckResult {
+    pub fn good(&self) -> bool {
+        self.meta_ok
+            && self.data_ok
+            && self.files_ok
+            && self.name_ok
+    }
+}
+
+pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&str>, known_hash: Option<&str>) -> Result<CheckResult> {
+
+    //TODO cleanup this function
+
+    pkg_file.rewind()?;
+
+    //TODO this progress bar doesn't play well everywhere
+    let pbar = indicatif::ProgressBar::new(1);
+    pbar.enable_steady_tick(std::time::Duration::from_millis(200));
+    pbar.set_style(indicatif::ProgressStyle::with_template(
+        " {spinner:.green} verifying package"
+    ).unwrap());
+
+    let mut ret = CheckResult::default();
+
+    // default state must be an integrity failure
+    assert!(!ret.meta_ok);
+    assert!(!ret.data_ok);
+    assert!(!ret.files_ok);
+    assert!(!ret.name_ok);
+
+    ret.file_hash = blake3_hash_reader(&mut pkg_file)?;
+    pkg_file.rewind()?;
+
+    if file_name.is_none() && known_hash.is_some() {
+        if known_hash.unwrap() == ret.file_hash {
+            // full file hash matched, assume everything else is good
+            //ret.hash_ok = true;
+            ret.meta_ok = true;
+            ret.data_ok = true;
+            ret.files_ok = true;
+            ret.name_ok = true;
+            return Ok(ret);
+        } else {
+            // hash does not match, failure
+            return Ok(ret);
+        }
+    }
+
+    let metadata_raw = read_metadata(pkg_file).context("error reading package metadata")?;
+    //let now = std::time::Instant::now();
+    let mut metadata = MetaData::from_reader(&mut std::io::Cursor::new(&metadata_raw))?;
+    //let delta = now.elapsed();
+    //println!("parse metadata: {:?}", delta);
+    ret.meta_ok = true;
+    //println!("metadata_raw {} {:?}..", metadata_raw.len(), &metadata_raw[0..16]);
+
+    // it can take a while to parse the file list for large packages, do that in a separate thread
+    // while we move on to hashing the package
+//    let meta_thread = std::thread::spawn(move || -> Result<MetaData> {
+//        MetaData::from_reader(&mut std::io::Cursor::new(&metadata_raw))
+//    });
+
+    // if not testing, assume ok
+    ret.name_ok = true;
+
+    if let Some(file_name) = file_name {
+        if let Some((name, version, arch)) = split_parts(file_name) {
+            ret.name_ok = metadata.name == name && metadata.version == version && metadata.arch.as_deref() == arch;
+        } else {
+            ret.name_ok = false;
+            return Ok(ret);
+        }
+    }
+
+    if known_hash.is_some() {
+        if known_hash.unwrap() == ret.file_hash {
+            ret.data_hash = metadata.data_hash.context("metadata has no data hash")?;
+            // assume the rest is good
+            ret.data_ok = true;
+            ret.files_ok = true;
+            return Ok(ret);
+        } else {
+            return Ok(ret);
+        }
+    }
+
+    // --- check data hash ---
+
+    pkg_file.rewind()?;
+    let computed_sum = {
+
+        let mut tar = tar::Archive::new(&mut pkg_file);
+        let (mut data, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
+
+        pbar.set_length(_size);
+        pbar.set_style(indicatif::ProgressStyle::with_template(
+            #[allow(clippy::literal_string_with_formatting_args)]
+            " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
+        ).unwrap());
+
+        //blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
+        blake3_hash_reader(&mut data)?
+    };
+    //dbg!(&computed_sum);
+
+    // -- later
+    //let metadata = meta_thread.join().unwrap();
+    //let meta_ok = metadata.is_ok();
+    //let meta_ok = true;
+
+    ret.data_ok = metadata.data_hash.as_ref() == Some(&computed_sum);
+
+    let mut meta_filelist = std::mem::take(&mut metadata.files);
+    ret.files_ok = true;
+
+    // check the file list
+    pkg_file.rewind()?;
+
+    pbar.set_position(0);
+    pbar.set_length(meta_filelist.len() as u64);
+    //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
+    #[allow(clippy::literal_string_with_formatting_args)]
+    pbar.set_style(indicatif::ProgressStyle::with_template(
+        " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
+    ).unwrap());
+
+    let mut outer_tar = tar::Archive::new(pkg_file);
+    let (data_tar_zst, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
+    let zstd = zstd::Decoder::new(data_tar_zst)?;
+    let mut tar = tar::Archive::new(zstd);
+    for ent in tar.entries()? {
+        let ent = ent?;
+        let path = ent.path()?;
+        let path = path.to_string_lossy().to_string();
+        let path = Utf8Path::new(&path);
+        if let Some(meta_info) = meta_filelist.remove(path) {
+            //dbg!(ent.header().entry_type());
+            //dbg!(&meta_info.filetype);
+            match (ent.header().entry_type(), meta_info.filetype) {
+                (tar::EntryType::Directory, FileType::Dir) => {}
+                (tar::EntryType::Regular,   FileType::File) => {}
+                (tar::EntryType::Symlink,   FileType::Link(_)) => {}
+                _ => {
+                    ret.files_ok = false;
+                    tracing::error!("a file in the tar was the incorrect file type {}", path);
+                    break;
+                }
+            }
+        } else {
+            tracing::error!("a file in the tar was not listed in the metadata {}", path);
+            ret.files_ok = false;
+            break;
+        }
+        pbar.inc(1);
+    }
+
+    pbar.finish_and_clear();
+
+    // if there are any remaining files, those were not in the tar
+    if !meta_filelist.is_empty() {
+        let path = meta_filelist.pop_first().unwrap().0;
+        tracing::error!("a file in the metadata was not in the data tar: {}", path);
+        //return Ok((false, metadata));
+        ret.files_ok = false;
+    }
+
+    return Ok(ret);
 }
 
 pub fn package_integrity_check_path(path: &Utf8Path) -> Result<(bool, MetaData)> {
@@ -449,16 +634,13 @@ pub fn read_metadata(pkg_file: &mut File) -> Result<Vec<u8>> {
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
+    //let now = std::time::Instant::now();
     pkg_file.rewind()?;
     let mut tar = tar::Archive::new(pkg_file);
     let (mut meta, _size) = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
     let metadata = MetaData::from_reader(&mut meta)?;
+    //println!("get metadata {:?}", now.elapsed());
     Ok(metadata)
-}
-
-pub fn get_filelist(pkg_file: &mut File) -> Result<OrderedMap<FilePath, FileInfo>> {
-    let metadata = get_metadata(pkg_file)?;
-    Ok(metadata.files)
 }
 
 /// "foo_1.2.3" -> ("foo", "1.2.3", None)

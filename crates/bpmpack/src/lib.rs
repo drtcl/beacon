@@ -9,7 +9,7 @@
 // tar the hashes and data tarball into a single package tarball
 // cleanup intermediate files
 
-//TODO given:
+//  given:
 //     a/
 //       b/
 //         c/
@@ -515,6 +515,24 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
         println!("Package created: {}", new_filepath);
     }
 
+    Ok(())
+}
+
+pub fn subcmd_verify(path: &Path) -> Result<()> {
+
+    if let Ok(true) = std::fs::exists(path) {
+    } else {
+        anyhow::bail!("file path does not exist");
+    }
+
+    let mut file = std::fs::File::open(path).context("failed to open package file")?;
+
+    let filename = path.file_name().context("path has no filename")?.to_string_lossy();
+
+    let check = package::package_integrity_check_full(&mut file, Some(&filename), None)?;
+    if !check.good() {
+        anyhow::bail!("package corrupt");
+    }
     Ok(())
 }
 
@@ -1251,6 +1269,11 @@ pub fn main_cli(matches: &clap::ArgMatches) -> Result<()> {
         Some(("list-files", matches)) => {
             let file = matches.get_one::<String>("pkgfile").unwrap();
             subcmd_list_files(Path::new(file))?;
+            std::process::exit(0);
+        },
+        Some(("verify", matches)) => {
+            let file = matches.get_one::<String>("pkgfile").unwrap();
+            subcmd_verify(Path::new(file))?;
             std::process::exit(0);
         },
         Some(("test-ignore", matches)) => {
