@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 
+pub mod status;
+
 /// Read all bytes from a [Read] and return a blake3 hash
 pub fn blake3_hash_reader<R: Read>(mut read: R) -> std::io::Result<String> {
     let mut hasher = blake3::Hasher::new();
@@ -67,42 +69,6 @@ pub fn get_filestate(path: &Utf8Path) -> FileState {
     //println!("path {}, state {:?}", path, state);
     state
 }
-
-//pub struct CustomProgress {
-//    pub bar: indicatif::ProgressBar,
-//    auto_clear: bool,
-//}
-//
-//impl Drop for CustomProgress {
-//    fn drop(&mut self) {
-//        if self.auto_clear {
-//            self.bar.finish_and_clear();
-//        }
-//    }
-//}
-//
-//impl CustomProgress {
-//    pub fn new_bar(bar: indicatif::ProgressBar) -> Self {
-//        Self { bar, auto_clear: false }
-//    }
-//    pub fn new(len: u64) -> Self {
-//        Self { bar: indicatif::ProgressBar::new(len), auto_clear: false }
-//    }
-//    pub fn new_style(len: u64, style: &str) -> Self {
-//        let bar = indicatif::ProgressBar::new(len);
-//        bar.set_style(indicatif::ProgressStyle::with_template(style).expect("bad progress style"));
-//        Self { bar, auto_clear: false }
-//    }
-//    pub fn hide(&self) {
-//        self.bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-//    }
-//    pub fn show(&self) {
-//        self.bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-//    }
-//    pub fn auto_clear(&mut self, yes: bool) {
-//        self.auto_clear = yes;
-//    }
-//}
 
 pub struct SlowWriter<T: Write> {
     inner: T,

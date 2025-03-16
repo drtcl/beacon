@@ -369,18 +369,19 @@ impl CheckResult {
     }
 }
 
-pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&str>, known_hash: Option<&str>) -> Result<CheckResult> {
-
-    //TODO cleanup this function
+pub fn package_integrity_check_full(
+    mut pkg_file: &mut File,
+    file_name: Option<&str>,
+    known_hash: Option<&str>,
+) -> Result<CheckResult> {
 
     pkg_file.rewind()?;
 
-    //TODO this progress bar doesn't play well everywhere
-    let pbar = indicatif::ProgressBar::new(1);
-    pbar.enable_steady_tick(std::time::Duration::from_millis(200));
-    pbar.set_style(indicatif::ProgressStyle::with_template(
-        " {spinner:.green} verifying package"
-    ).unwrap());
+    let filesize = pkg_file.metadata().ok().map(|v| v.len());
+
+    let status = bpmutil::status::global();
+    let bar = status.add_task(Some("verify_package"), filesize);
+    bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying package {wide_bar:.blue} ").unwrap());
 
     let mut ret = CheckResult::default();
 
@@ -390,7 +391,10 @@ pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&
     assert!(!ret.files_ok);
     assert!(!ret.name_ok);
 
-    ret.file_hash = blake3_hash_reader(&mut pkg_file)?;
+    let mut read = bpmutil::status::wrap_read(Some(&bar), &mut pkg_file);
+    ret.file_hash = blake3_hash_reader(&mut read)?;
+    bar.finish_and_clear();
+
     pkg_file.rewind()?;
 
     if file_name.is_none() && known_hash.is_some() {
@@ -414,17 +418,9 @@ pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&
     //let delta = now.elapsed();
     //println!("parse metadata: {:?}", delta);
     ret.meta_ok = true;
-    //println!("metadata_raw {} {:?}..", metadata_raw.len(), &metadata_raw[0..16]);
-
-    // it can take a while to parse the file list for large packages, do that in a separate thread
-    // while we move on to hashing the package
-//    let meta_thread = std::thread::spawn(move || -> Result<MetaData> {
-//        MetaData::from_reader(&mut std::io::Cursor::new(&metadata_raw))
-//    });
 
     // if not testing, assume ok
     ret.name_ok = true;
-
     if let Some(file_name) = file_name {
         if let Some((name, version, arch)) = split_parts(file_name) {
             ret.name_ok = metadata.name == name && metadata.version == version && metadata.arch.as_deref() == arch;
@@ -452,23 +448,16 @@ pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&
     let computed_sum = {
 
         let mut tar = tar::Archive::new(&mut pkg_file);
-        let (mut data, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
+        let (mut data, size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
 
-        pbar.set_length(_size);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            #[allow(clippy::literal_string_with_formatting_args)]
-            " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
-        ).unwrap());
+        let bar = status.add_task(Some("verify_data"), Some(size));
+        bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying data    {wide_bar:.blue} ").unwrap());
 
-        //blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
-        blake3_hash_reader(&mut data)?
+        let mut read = bar.wrap_read(&mut data);
+        let sum = blake3_hash_reader(&mut read)?;
+        bar.finish_and_clear();
+        sum
     };
-    //dbg!(&computed_sum);
-
-    // -- later
-    //let metadata = meta_thread.join().unwrap();
-    //let meta_ok = metadata.is_ok();
-    //let meta_ok = true;
 
     ret.data_ok = metadata.data_hash.as_ref() == Some(&computed_sum);
 
@@ -478,13 +467,8 @@ pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&
     // check the file list
     pkg_file.rewind()?;
 
-    pbar.set_position(0);
-    pbar.set_length(meta_filelist.len() as u64);
-    //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
-    #[allow(clippy::literal_string_with_formatting_args)]
-    pbar.set_style(indicatif::ProgressStyle::with_template(
-        " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
-    ).unwrap());
+    let bar = status.add_task(Some("verify_files"), Some(meta_filelist.len() as u64));
+    bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying files   {wide_bar:.blue} ").unwrap());
 
     let mut outer_tar = tar::Archive::new(pkg_file);
     let (data_tar_zst, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
@@ -496,8 +480,6 @@ pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&
         let path = path.to_string_lossy().to_string();
         let path = Utf8Path::new(&path);
         if let Some(meta_info) = meta_filelist.remove(path) {
-            //dbg!(ent.header().entry_type());
-            //dbg!(&meta_info.filetype);
             match (ent.header().entry_type(), meta_info.filetype) {
                 (tar::EntryType::Directory, FileType::Dir) => {}
                 (tar::EntryType::Regular,   FileType::File) => {}
@@ -513,115 +495,26 @@ pub fn package_integrity_check_full(mut pkg_file: &mut File, file_name: Option<&
             ret.files_ok = false;
             break;
         }
-        pbar.inc(1);
+        bar.inc(1);
     }
-
-    pbar.finish_and_clear();
 
     // if there are any remaining files, those were not in the tar
     if !meta_filelist.is_empty() {
         let path = meta_filelist.pop_first().unwrap().0;
         tracing::error!("a file in the metadata was not in the data tar: {}", path);
-        //return Ok((false, metadata));
         ret.files_ok = false;
     }
+
+    bar.finish_and_clear();
 
     return Ok(ret);
 }
 
-pub fn package_integrity_check_path(path: &Utf8Path) -> Result<(bool, MetaData)> {
-    let mut file = File::open(path).context("reading file")?;
-    package_integrity_check(&mut file)
-}
-
 /// Check that package file is self consistent. The metadata file list and data hash matches.
-pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaData)> {
-
-    let pbar = indicatif::ProgressBar::new(1);
-    pbar.enable_steady_tick(std::time::Duration::from_millis(200));
-    pbar.set_style(indicatif::ProgressStyle::with_template(
-        " {spinner:.green} verifying package"
-    ).unwrap());
-
-    // it can take a while to parse the file list for large packages, do that in a separate thread
-    // while we move on to hashing the package
-    let metadata = read_metadata(pkg_file).context("error reading package metadata")?;
-    let meta_thread = std::thread::spawn(move || -> Result<MetaData> {
-        MetaData::from_reader(&mut std::io::Cursor::new(&metadata))
-    });
-
-    pkg_file.rewind()?;
-    let computed_sum = {
-
-        let mut tar = tar::Archive::new(&mut pkg_file);
-        let (mut data, size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
-
-        pbar.set_length(size);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            #[allow(clippy::literal_string_with_formatting_args)]
-            " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
-        ).unwrap());
-
-        blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
-    };
-
-    let metadata = meta_thread.join().unwrap()?; // unwrapping an error is only possible on a panic
-
-    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
-    let matches = &computed_sum == described_sum;
-    tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
-
-    //pbar.finish_and_clear();
-
-    if !matches {
-        tracing::error!("package file data hash mismatch {} != {}", computed_sum, described_sum);
-        return Ok((false, metadata));
-    }
-
-    let mut meta_filelist = metadata.files.clone();
-
-    // check the file list
-    pkg_file.rewind()?;
-    {
-
-        pbar.set_position(0);
-        pbar.set_length(meta_filelist.len() as u64);
-        //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
-        #[allow(clippy::literal_string_with_formatting_args)]
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
-        ).unwrap());
-
-        let mut outer_tar = tar::Archive::new(pkg_file);
-        let (data_tar_zst, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
-        let zstd = zstd::Decoder::new(data_tar_zst)?;
-        let mut tar = tar::Archive::new(zstd);
-        for ent in tar.entries()? {
-            let ent = ent?;
-            let path = ent.path()?;
-            let path = path.to_string_lossy().to_string();
-            let path = Utf8Path::new(&path);
-            if meta_filelist.remove(path).is_none() {
-                tracing::error!("a file in the tar was not listed in the metadata {}", path);
-                return Ok((false, metadata));
-            }
-            // TODO also check that the file type matches
-            pbar.inc(1);
-        }
-
-        pbar.finish_and_clear();
-
-        // if there are any remaining files, those were not in the tar
-        if !meta_filelist.is_empty() {
-            let path = meta_filelist.pop_first().unwrap().0;
-            tracing::error!("a file in the metadata was not in the data tar: {}", path);
-            return Ok((false, metadata));
-        }
-    }
-
-    tracing::trace!("package passes integrity check");
-
-    Ok((true, metadata))
+pub fn package_integrity_check(pkg_file: &mut File) -> Result<(bool, MetaData)> {
+    let check = package_integrity_check_full(pkg_file, None, None)?;
+    let md = get_metadata(pkg_file)?;
+    Ok((check.good(), md))
 }
 
 pub fn read_metadata(pkg_file: &mut File) -> Result<Vec<u8>> {

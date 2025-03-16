@@ -2,11 +2,10 @@ use anyhow::Context;
 use crate::AResult;
 use crate::fetch::*;
 use crate::provider::Provide;
-use crate::search::*;
+use indicatif::ProgressStyle;
 use package::PackageID;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -35,7 +34,7 @@ impl scan_result::Scan for FileSystem {
 
 impl Fetch for FileSystem {
 
-    fn fetch(&self, write: &mut dyn Write, pkg: &PackageID, url: &str, bars: Option<&MultiProgress>) -> AResult<u64> {
+    fn fetch(&self, write: &mut dyn Write, pkg: &PackageID, url: &str) -> AResult<u64> {
 
         tracing::trace!(pkg=?pkg, url, "FileSystem::fetch()");
 
@@ -44,48 +43,38 @@ impl Fetch for FileSystem {
         #[cfg(unix)]
         let file_size = file.metadata().ok().map(|m| m.size());
 
+        let msg = format!("{} {}", pkg.name, pkg.version);
+
         #[cfg(windows)]
         let file_size = file.metadata().ok().map(|m| m.file_size());
 
-        let msg = format!("{} {}", pkg.name, pkg.version);
-        let bar = if let Some(size) = file_size {
-            ProgressBar::new(size)
-                .with_message(msg)
-                .with_prefix("✓")
-                .with_style(ProgressStyle::with_template(
+        let status_mgr = bpmutil::status::global();
+        let mut bar = status_mgr.add_task(Some(format!("download {}", pkg.name)), file_size);
+        bar.set_message(msg);
+        bar.set_prefix("✓");
+
+        if file_size.is_some() {
+            bar.set_style(ProgressStyle::with_template(
                     #[allow(clippy::literal_string_with_formatting_args)]
                     " {spinner:.green} downloading {msg:.cyan} {bytes_per_sec} {wide_bar:.green} {bytes}/{total_bytes} - {eta} "
-                ).unwrap())
+            ).unwrap());
         } else {
-            ProgressBar::no_length()
-                .with_message(msg)
-                .with_prefix("✓")
-                .with_style(ProgressStyle::with_template(
+            bar.set_style(ProgressStyle::with_template(
                     #[allow(clippy::literal_string_with_formatting_args)]
                     " {spinner:.green} downloading {msg:.cyan} {bytes_per_sec} {bytes} "
-                ).unwrap())
-        };
-
-        let bar = if let Some(bars) = bars {
-            bars.add(bar)
-        } else {
-            bar
-        };
+            ).unwrap());
+        }
 
         let mut write = bar.wrap_write(write);
 
         // [debug] slow
         #[cfg(feature="dev-debug-slow")]
-        let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_millis(1));
+        let mut write = bpmutil::SlowWriter::new(&mut write, std::time::Duration::from_micros(900));
 
         let ret = std::io::copy(&mut file, &mut write).context("copy file");
 
-        let bar = if let Some(bars) = bars {
-            bars.remove(&bar);
-            bars.insert(0, bar)
-        } else {
-            bar
-        };
+        status_mgr.remove(&bar);
+        status_mgr.insert(0, &mut bar);
 
         if ret.is_ok() {
             bar.set_style(ProgressStyle::with_template(

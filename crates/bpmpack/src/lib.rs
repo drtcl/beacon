@@ -33,7 +33,7 @@
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use ignore::gitignore::Gitignore;
-use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
+use indicatif::ProgressStyle;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::File;
@@ -536,13 +536,9 @@ pub fn subcmd_verify(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn subcmd_list_files(file: &Path) -> Result<()> {
+pub fn subcmd_list_files(path: &Path) -> Result<()> {
 
-    let mut file = std::fs::File::open(file).context("failed to open package file")?;
-
-    package::package_integrity_check(&mut file)?;
-
-    file.rewind()?;
+    let file = std::fs::File::open(path).context("failed to open package file")?;
 
     let mut tar = tar::Archive::new(file);
     let (data, _size) = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut tar)?;
@@ -726,32 +722,30 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // -- progress bars --
     //                 _____________________________________________________________________
     //  size_bar       | .: packing files     5s/20s         32 MiB/s     120MiB / 1GiB    |
-    //  count_bar      |    file 37/1000 [==============================              ]    |
+    //  count_bar      |    file 370/1000 [===========                                   ] |
     //  comp_bar       |    compression  [==            ] 5MiB / 120MiB                    |
     //  (then later)   |                                                                   |
     //  finish_bar     |    writing package [===============            ] 25MiB / 50MiB    |
     //                 ---------------------------------------------------------------------
 
-    let bars = MultiProgress::new();
-
     let file_size_sum = file_list.files.iter().filter(|ent| !ent.ignore).map(|ent| ent.size).sum::<u64>();
     let file_included_count = file_list.files.iter().filter(|ent| !ent.ignore).count() as u64;
 
-    let size_bar = bars.add(ProgressBar::new(file_size_sum));
-    let count_bar = bars.add(ProgressBar::new(file_included_count));
-    let comp_bar = bars.add(ProgressBar::new(0));
+    let status_mgr = bpmutil::status::global();
+    let size_bar  = status_mgr.add_task(Some("packing"), Some(file_size_sum));
+    let count_bar = status_mgr.add_task(Some("files"), Some(file_included_count));
+    let comp_bar  = status_mgr.add_task(Some("compressing"), Some(0));
     size_bar.enable_steady_tick(Duration::from_millis(200));
     size_bar.set_style(ProgressStyle::with_template(
         " {spinner:.green} packing files   {elapsed}/{duration}   {bytes_per_sec}   {bytes}/{total_bytes} "
     ).unwrap());
-
     count_bar.set_style(ProgressStyle::with_template(
         #[allow(clippy::literal_string_with_formatting_args)]
         "   file {pos}/{len} {wide_bar:.green} ").unwrap()
     );
     comp_bar.set_style(ProgressStyle::with_template(
         #[allow(clippy::literal_string_with_formatting_args)]
-        "   compression  {percent}%  {bytes} / {total_bytes} {bar:25} "
+        "   compression ratio {percent}%  {bytes} / {total_bytes} {bar:25} "
     ).unwrap());
 
     // layers of wrapping:
@@ -827,7 +821,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                     }
                 }
                 if !parent_ignored {
-                    bars.suspend(|| println!("I \t{}", entry.pkg_path));
+                    status_mgr.suspend(|| println!("I \t{}", entry.pkg_path));
                 }
 
                 if entry.is_dir() {
@@ -879,7 +873,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         }
 
         if verbose {
-            bars.suspend(|| {
+            status_mgr.suspend(|| {
                 println!("A{}{}{}{} \t{}",
                     if entry.is_dir()       { "d" } else { "" },
                     if entry.is_symlink()   { "s" } else { "" },
@@ -938,8 +932,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     //meta.to_writer(&mut b);
     //println!("{}", String::from_utf8_lossy(&b));
 
-    let finish_bar = ProgressBar::new(compressed_size + meta_data_size);
-    let finish_bar = bars.add(finish_bar);
+    let finish_bar = status_mgr.add_task(Some("finish"), Some(compressed_size + meta_data_size));
     finish_bar.enable_steady_tick(Duration::from_millis(200));
     finish_bar.set_style(ProgressStyle::with_template(" {spinner:.green} writing package {wide_bar:.green/white} {bytes}/{total_bytes}").unwrap());
 
@@ -1002,10 +995,10 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     println!("package arch:           {}", package_arch.unwrap_or("noarch"));
     println!("package filename:       {}", package_filename);
     println!("package hash [blake3]:  {}", package_hash);
-    println!("package size:           {} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
+    println!("package size:           {:-10} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
     println!("data file count:        {}", file_included_count);
-    println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
-    println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
+    println!("data size uncompressed: {:-10} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
+    println!("data size compressed:   {:-10} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
     println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
     println!("data hash [blake3]:     {}", data_tar_hash);
     println!("package created at:     {}", std::fs::canonicalize(package_file_path.as_path())?.display());

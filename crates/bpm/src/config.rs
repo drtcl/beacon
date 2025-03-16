@@ -4,7 +4,6 @@ use camino::Utf8Path;
 use crate::AResult;
 use crate::provider::Provider;
 use serde::{Serialize, Deserialize};
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -148,14 +147,14 @@ enum ArchToml {
     Multiple(Vec<String>),
 }
 
-impl ArchToml {
-    fn get(self) -> Vec<String> {
-        match self {
-            Self::Single(val) => vec![val],
-            Self::Multiple(vals) => vals,
-        }
-    }
-}
+//impl ArchToml {
+//    fn get(self) -> Vec<String> {
+//        match self {
+//            Self::Single(val) => vec![val],
+//            Self::Multiple(vals) => vals,
+//        }
+//    }
+//}
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -167,12 +166,14 @@ enum MountToml {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum ProviderToml {
     Path(String),
     Table {
         path: String,
+
         //#[serde(default)]
         note: Option<String>,
     },
@@ -403,8 +404,8 @@ fn path_replace<S: Into<String>>(path: S) -> anyhow::Result<PathType> {
 
     // ${BPM} must be the first thing in the string
     if path.starts_with("${BPM}/") {
-        let cur_exe = std::env::current_exe().expect("failed to get current exe path");
-        let exe_dir = Utf8PathBuf::from(cur_exe.parent().unwrap().to_str().context("invalid path, not utf8")?);
+        //let cur_exe = std::env::current_exe().expect("failed to get current exe path");
+        //let exe_dir = Utf8PathBuf::from(cur_exe.parent().unwrap().to_str().context("invalid path, not utf8")?);
         path = path.strip_prefix("${BPM}/").unwrap().into();
         relative = Some(RelativeToAnchor::Bpm);
     }
@@ -650,7 +651,7 @@ fn env_replace(text: &mut String) {
         if let Some(inner) = full_match.strip_prefix("${ENV(") {
             if let Some(inner) = inner.strip_suffix("}") {
                 let mut words = inner.split(':');
-                let mut name = words.next().unwrap_or("");
+                let name = words.next().unwrap_or("");
                 let tv = words.next().unwrap_or("");
                 let fv = words.next().unwrap_or("");
                 if let Some(name) = name.strip_suffix(')') {

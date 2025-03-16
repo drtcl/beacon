@@ -1,22 +1,16 @@
 use bpmutil::*;
 use chrono::SubsecRound;
 use crate::*;
-use indicatif::MultiProgress;
-use itertools::Itertools;
 use package::PackageID;
 use rand::distributions::{Alphanumeric, DistString};
 use serde::{Serialize, Deserialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::IsTerminal;
-use std::io::Read;
 use std::io::Seek;
-use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -26,13 +20,15 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-//TODO smartstring
-//TODO faster json parsing
-//TODO multiple paths for a provider
+//TODO capability probing
+//TODO multiple paths for a provider OR provider groups. (probably groups)
 //TODO fastpath, pre-scan, pre-scan age limit, version it
-//TODO progress interface
-//TODO non-interactive/as-child-process progress reporting
+//TODO smartstring
 //
+//DONE progress interface
+//DONE non-interactive/as-child-process progress reporting
+//DONE faster json parsing
+//...
 //DONE verify at cache time, store packagefile hash for quick verifies later
 //...
 //DONE -t, --target <dir> for the install command, for new installs only, ignored with --update,--reinstall
@@ -201,6 +197,7 @@ fn parse_pkg_arg(arg: &str) -> AResult<PkgArgType> {
 impl App {
 
     pub fn new(config: config::Config) -> Self {
+
         Self {
             config,
             db: db::Db::new(),
@@ -305,7 +302,7 @@ impl App {
 
         self.shared_lock()?;
 
-        let mut results = self.search_results(pkg_name, exact)?;
+        let results = self.search_results(pkg_name, exact)?;
 
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
         let mut sep = ' ';
@@ -378,7 +375,7 @@ impl App {
 
         // filter by arch
         if !self.arch_filter.is_empty() {
-            let mut arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
+            let arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
             merged_results.filter_arch(arch_filter.as_slice());
         }
 
@@ -407,8 +404,6 @@ impl App {
     fn install_pkg_file(&mut self, file_path: Utf8PathBuf, package_hash: Option<String>, versioning: Versioning, target: Option<&String>) -> AResult<()> {
 
         tracing::debug!("install_pkg_file {}", file_path);
-
-        let now = std::time::Instant::now(); // TODO dd
 
         let package_file_filename = file_path.file_name().context("package file has no filename")?;
         let package_hash = package_hash.or_else(|| {
@@ -470,16 +465,16 @@ impl App {
         // obtain reader for embeded data archive
         file.rewind()?;
         let mut outer_tar = tar::Archive::new(&mut file);
-        let (mut inner_tar, size) = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
+        let (mut inner_tar, _size) = package::seek_to_tar_entry("data.tar.zst", &mut outer_tar)?;
         let mut zstd = zstd::stream::read::Decoder::new(&mut inner_tar)?;
         let mut data_tar = tar::Archive::new(&mut zstd);
 
-        let pbar = indicatif::ProgressBar::new(metadata.files.len() as u64);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
+        let bar = bpmutil::status::global().add_task(Some("install"), Some(metadata.files.len() as u64));
+        bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             "   {msg}\n {spinner:.green} installing {prefix} {wide_bar:.green} {pos}/{len} "
         ).unwrap());
-        pbar.set_prefix(metadata.name.to_string());
+        bar.set_prefix(metadata.name.to_string());
 
         #[cfg(unix)]
         let mut ro_dirs = HashMap::new();
@@ -490,7 +485,7 @@ impl App {
             let mut entry = entry?;
 
             let path = Utf8PathBuf::from_path_buf(entry.path().unwrap().into_owned()).unwrap();
-            //pbar.suspend(|| println!("{}", path));
+            //bar.suspend(|| println!("{}", path));
 
             let installed_path = join_path_utf8!(&install_dir_full, &path);
 
@@ -519,7 +514,7 @@ impl App {
 
             let installed_ok = entry.unpack_in(&install_dir_full)?;
 
-            pbar.set_message(String::from(path.as_str()));
+            bar.set_message(String::from(path.as_str()));
 
             // store the mtime
             if let Some(info) = metadata.files.get_mut(&path) {
@@ -535,7 +530,7 @@ impl App {
                 tracing::error!("unpack skipped {:?}", entry.path());
             }
 
-            pbar.inc(1);
+            bar.inc(1);
         }
 
         // restore the permissions on any readonly dir that was modified during installation
@@ -549,7 +544,7 @@ impl App {
             }
         }
 
-        pbar.finish_and_clear();
+        bar.finish_and_clear();
 
         let mut details = db::DbPkg::new(metadata);
         details.location = Some(install_dir);
@@ -566,8 +561,6 @@ impl App {
 
         println!("Installation complete");
 
-        println!("install {:?}", now.elapsed()); //TODO dd
-
         Ok(())
     }
 
@@ -581,7 +574,7 @@ impl App {
         // this builds an iterator over [required_arch, preferred_arch, *arch_filter - preferred_arch]
         // and take()s only the first one if required_arch.is_some(), otherwise everything.
         let pref_avail = preferred_arch.is_some() && self.arch_filter.iter().any(|f| package::ArchMatcher::from(f).matches(preferred_arch.unwrap()));
-        let mut arch_filter_iter = required_arch.into_iter()
+        let arch_filter_iter = required_arch.into_iter()
             .chain(preferred_arch.into_iter().filter(|_| pref_avail))
             .chain(
                 self.arch_filter.iter().filter(|f| {
@@ -644,7 +637,7 @@ impl App {
 
         // grab the first version entry matching the arch filter ordering
         let mut pinfo = results.packages.into_iter().next().context("missing expected package info")?.1;
-        if let Some((version, mut vlist)) = pinfo.versions.pop_last() {
+        if let Some((version, vlist)) = pinfo.versions.pop_last() {
 
             for arch in arch_filter_iter {
                 if let Some(vinfo) = vlist.iter().find(|ent| package::ArchMatcher::from(arch).matches(&ent.arch)) {
@@ -673,7 +666,7 @@ impl App {
 
         self.exclusive_lock()?;
 
-        let trace_span = tracing::trace_span!("bpm install").entered();
+        let _trace_span = tracing::trace_span!("bpm install").entered();
 
         let mut pkg_file_path : Option<Utf8PathBuf> = None;
         let pkg_name : String;
@@ -726,7 +719,7 @@ impl App {
             // The user may have given a specific version or channel
             //   OR they may not have, in which case we're grabbing the greatest version.
             // Packages prefer to stay on the same arch that they currently have installed.
-            let (listing, mut versioning) =
+            let (listing, versioning) =
                 self.find_package_version(
                     pkg_name.as_str(),
                     pkg_version.as_deref(), // None OR specific version or channel given by user
@@ -891,7 +884,7 @@ impl App {
             tracing::trace!("package integrity check pass");
         }
 
-        let mut new_metadata = package::get_metadata(&mut new_package_fd).context("error reading metadata")?;
+        let new_metadata = package::get_metadata(&mut new_package_fd).context("error reading metadata")?;
 
         let new_files = new_metadata.files.clone();
 
@@ -903,8 +896,6 @@ impl App {
         let location = current_pkg_info.location.as_ref().context("installed package has no location")?.clone();
         let location_full = location.full_path()?;
         tracing::trace!("installing to the same location {:?}", location);
-
-        let bars = indicatif::MultiProgress::new();
 
         // old_files -= new_files
         for (path, new_file) in &new_files {
@@ -922,8 +913,6 @@ impl App {
         let remove_files = old_files;
 
         let delete_thread = std::thread::spawn({
-            let current_pkg_info = current_pkg_info.clone();
-            let bars = bars.clone();
             let location_full = location_full.clone();
             move || {
 
@@ -932,7 +921,7 @@ impl App {
                     (path, info)
                 });
 
-                let delete_bar = bars.add(indicatif::ProgressBar::new(remove_files.len() as u64));
+                let delete_bar = bpmutil::status::global().add_task(Some("delete"), Some(remove_files.len() as u64));
                 delete_bar.set_style(indicatif::ProgressStyle::with_template(
                     #[allow(clippy::literal_string_with_formatting_args)]
                     " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
@@ -947,12 +936,11 @@ impl App {
             }
         });
 
-        let diff_bar = indicatif::ProgressBar::new(new_files.len() as u64);
+        let diff_bar = bpmutil::status::global().add_task(Some("diff"), Some(new_files.len() as u64));
         diff_bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} diffing  {wide_bar:.blue} {pos}/{len} "
         ).unwrap());
-        let diff_bar = bars.add(diff_bar);
 
         let skip_files = std::sync::Mutex::new(HashSet::<Utf8PathBuf>::new());
 
@@ -961,15 +949,13 @@ impl App {
 
             let (send, recv) = crossbeam::channel::bounded::<(&Utf8PathBuf, &package::FileInfo)>(256);
 
-            let diff_threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1).clamp(1, 8);
+            let diff_threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1).clamp(1, 12);
 
             for _ in 0..diff_threads {
-                let location = &location;
                 let location_full = &location_full;
-                let new_files = &new_files;
                 let skip_files = &skip_files;
                 let recv = recv.clone();
-                let diff_bar = diff_bar.clone();
+                let diff_bar = &diff_bar;
                 s.spawn(move || {
 
                     let mut t_skip_files = HashSet::<Utf8PathBuf>::new();
@@ -1044,10 +1030,7 @@ impl App {
             anyhow::bail!("Error in file deletion thread");
         }
 
-        let update_bar = bars.add(indicatif::ProgressBar::new((new_files.len() - skip_files.len()) as u64));
-        //let update_bar = bars.add(indicatif::ProgressBar::new(new_files.len() as u64));
-        //update_bar.set_position(skip_files.len() as u64);
-
+        let update_bar = bpmutil::status::global().add_task(Some("update"), Some((new_files.len() - skip_files.len()) as u64));
         update_bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             "   {msg}\n {spinner:.green} updating {wide_bar:.green} {pos}/{len} "
@@ -1162,7 +1145,7 @@ impl App {
         }
 
         println!("{} package{} to update:", updates2.len(), tern!(updates2.len() > 1, "s", ""));
-        for (name, oldv, listing, _versioning, cache_file) in &updates2 {
+        for (name, oldv, listing, _versioning, _cache_file) in &updates2 {
             println!("  {}: {} -> {}", name, oldv, listing.version);
         }
 
@@ -1170,7 +1153,7 @@ impl App {
 
             println!("Fetching Packages");
 
-            for (name, oldv, listing, versioning, cache_file) in &mut updates2 {
+            for (name, _oldv, listing, _versioning, cache_file) in &mut updates2 {
                 if cache_file.is_none() {
                     let ret = self.cache_package_require(&PackageID{
                         name: name.to_string(),
@@ -1687,7 +1670,7 @@ impl App {
                 let c = match &info.filetype {
                     package::FileType::Dir => 'd',
                     package::FileType::File => 'f',
-                    package::FileType::Link(to) => 's',
+                    package::FileType::Link(_to) => 's',
                 };
                 print!("{c} ");
             }
@@ -1746,7 +1729,7 @@ impl App {
 
         let read_file = |path: &Utf8Path| -> AResult<_> {
             let mut file = File::open(path).context("failed to open package file")?;
-            let (ok, metadata) = package::package_integrity_check(&mut file)?;
+            let (_ok, metadata) = package::package_integrity_check(&mut file)?;
             Ok(metadata.kv)
         };
 
@@ -1821,7 +1804,7 @@ impl App {
             anyhow::bail!("package not found");
         }
 
-        master.retain(|pkg_name, kv| !kv.is_empty());
+        master.retain(|_pkg_name, kv| !kv.is_empty());
         if one_pkg && one_key && master.is_empty() {
             anyhow::bail!("key not found");
         }
@@ -1956,7 +1939,7 @@ impl App {
         if tmax == 0 {
             tmax = std::thread::available_parallelism().map_or(1, |v| v.get() as u32);
         };
-        let mut tcount = AtomicU32::new(0);
+        let tcount = AtomicU32::new(0);
 
         std::thread::scope(|s| {
 
@@ -1975,7 +1958,7 @@ impl App {
                     let tid = std::thread::current().id().as_u64();
 
                     // decrement the thread counter upon drop (when this thread is done)
-                    let decr = AtomicDecrDrop{val: &tcount};
+                    let _decr = AtomicDecrDrop{val: &tcount};
 
                     let mut lock_path = provider.cache_file.clone();
                     if let Some(e) = lock_path.extension() {
@@ -2008,7 +1991,7 @@ impl App {
 
                     tracing::debug!("[scan] [t{tid}] scanning {}", &provider.name);
 
-                    let mut arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
+                    let arch_filter = self.arch_filter.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
                     let arch_filter = if arch_filter.is_empty() { None } else { Some(arch_filter) };
                     let arch_filter = arch_filter.as_deref();
 
@@ -2057,7 +2040,6 @@ impl App {
 
         if let Ok(files) = std::fs::read_dir(join_path_utf8!(cache_dir, "packages")) {
             for file in files.flatten() {
-                let typ = file.file_type();
                 let path = Utf8Path::from_path(file.path().as_path()).map(Utf8Path::to_path_buf);
 
                 if file.file_type().is_ok_and(|t| t.is_file())
@@ -2352,8 +2334,6 @@ impl App {
 
         self.exclusive_lock()?;
 
-        let pkg_name = pkgs[0].as_str();
-
         let pkg_args : Result<Vec<PkgArgType>, _> = pkgs.iter().map(|s| parse_pkg_arg(s)).collect();
         let mut pkg_args = pkg_args?;
 
@@ -2366,7 +2346,7 @@ impl App {
         let filepaths : Vec<_> = pkg_args.extract_if(.., |arg| matches!(arg, PkgArgType::Filepath{..})).collect();
         for f in filepaths {
             match f {
-                PkgArgType::Filepath { path, name, version, arch } => {
+                PkgArgType::Filepath { path, .. } => {
                     //println!("   copy {}", path);
                     tracing::info!("cache copy {}", path);
                     if let Ok((did_cache, cache_path, hash)) = self.cache_store_file(&path) {
@@ -2413,29 +2393,21 @@ impl App {
         }
 
         let providers : Vec<&provider::Provider> = self.filtered_providers().collect();
-        let bars = MultiProgress::new();
-
-        //let total_bar = indicatif::ProgressBar::new(ids.len() as u64)
-        //    .with_style(indicatif::ProgressStyle::with_template("   Fetching {pos}/{len}   {elapsed} ").unwrap());
-        //total_bar.enable_steady_tick(Duration::from_secs(1));
-        //let total_bar = bars.add(total_bar);
 
         let mut jobs = std::cmp::max(1, self.config.cache_fetch_jobs as usize);
         jobs = std::cmp::min(jobs, ids.len());
 
         let ids = Mutex::new(ids);
-        let mut touch : Mutex<Vec<_>> = Mutex::new(Vec::new());
+        let touch : Mutex<Vec<_>> = Mutex::new(Vec::new());
 
-        let mut error_count = std::sync::atomic::AtomicU32::new(error_count);
+        let error_count = std::sync::atomic::AtomicU32::new(error_count);
 
         std::thread::scope(|s| {
             for _tid in 0..jobs {
                 let ids = &ids;
                 let cache_dir = &self.config.cache_dir;
                 let providers = &providers;
-                let bars = &bars;
                 let error_count = &error_count;
-                //let total_bar = &total_bar;
                 let touch = &touch;
                 let _t = s.spawn(move || {
                     loop {
@@ -2443,7 +2415,7 @@ impl App {
                             None => { break; },
                             Some(id) => id
                         };
-                        if let Ok((is_new, cache_path, hash)) = Self::mt_cache_package_require(providers, cache_dir, &id, bars) {
+                        if let Ok((is_new, cache_path, hash)) = Self::mt_cache_package_require(providers, cache_dir, &id) {
                             tracing::trace!("cache fetched {}", cache_path);
                             if is_new {
                                 touch.lock().unwrap().push((cache_path, hash));
@@ -2457,8 +2429,6 @@ impl App {
                 });
             }
         });
-
-        //total_bar.finish_and_clear();
 
         for (path, hash) in touch.into_inner().unwrap() {
             if let Some(fname) = path.file_name() {
@@ -2495,7 +2465,7 @@ impl App {
                 if let Some(fname) = path.file_name() {
                     if package::is_packagefile_name(fname) {
                         // note: package files of any arch are all touched
-                        if let Some((pname, pversion, arch)) = package::split_parts(fname) {
+                        if let Some((pname, pversion, _arch)) = package::split_parts(fname) {
 
                             if pname != pkg {
                                 continue;
@@ -2568,37 +2538,28 @@ impl App {
     /// OR FETCH a package and cache it.
     ///
     /// returns (is_new, cache_path, pkg_hash)
-    fn mt_cache_package_require(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<(bool, Utf8PathBuf, Option<String>)> {
+    fn mt_cache_package_require(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID) -> AResult<(bool, Utf8PathBuf, Option<String>)> {
         match Self::mt_cache_package_lookup(cache_dir, id) {
             Some(cached_file) => Ok((false, cached_file, None)),
             None => {
-                let (cache_file, hash) = Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?;
+                //let (cache_file, hash) = Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?;
+                //let (cache_file, hash) = Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?;
+                let (cache_file, hash) = Self::mt_cache_fetch_cmd(providers, cache_dir, id)?;
                 Ok((true, cache_file, hash))
             }
         }
     }
 
-//    fn mt_cache_package_require(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf> {
-//        let cached_file = match Self::mt_cache_package_lookup(cache_dir, id) {
-//            Some(cached_file) => cached_file,
-//            None => Self::mt_cache_fetch_cmd(providers, cache_dir, id, bars)?,
-//        };
-//        Ok(cached_file)
-//    }
-//
-//    fn mt_cache_fetch_cmd(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<Utf8PathBuf> {
-//        Self::mt_cache_fetch_cmd2(providers.iter().copied(), cache_dir, id, bars)
-//    }
 
     // returns (cache_path, pkg_hash)
-    fn mt_cache_fetch_cmd(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<(Utf8PathBuf, Option<String>)> {
-        Self::mt_cache_fetch_cmd2(providers.iter().copied(), cache_dir, id, bars)
+    fn mt_cache_fetch_cmd(providers: &[&provider::Provider], cache_dir: &Utf8Path, id: &PackageID) -> AResult<(Utf8PathBuf, Option<String>)> {
+        Self::mt_cache_fetch_cmd2(providers.iter().copied(), cache_dir, id)
     }
 
     // note: this does not error on the first failure, it will try another provider
     //
     // returns (cache_path, pkg_hash)
-    fn mt_cache_fetch_cmd2<'a, T>(providers: T, cache_dir: &Utf8Path, id: &PackageID, bars: &MultiProgress) -> AResult<(Utf8PathBuf, Option<String>)>
+    fn mt_cache_fetch_cmd2<'a, T>(providers: T, cache_dir: &Utf8Path, id: &PackageID) -> AResult<(Utf8PathBuf, Option<String>)>
         where T: Iterator<Item=&'a provider::Provider>,
     {
 
@@ -2632,7 +2593,7 @@ impl App {
                                 tracing::warn!("could not acquire lock on temp download file {}", temp_path);
                             }
 
-                            let result = provider.as_provide().fetch(&mut file, id, &info.uri, Some(bars));
+                            let result = provider.as_provide().fetch(&mut file, id, &info.uri);
                             match result {
                                 Err(ref _e) => { tracing::warn!(uri=info.uri, "[cache fetch] fetch failed"); }
                                 Ok(_v)      => { tracing::debug!(uri=info.uri, "[cache fetch] fetch success"); }
@@ -2649,7 +2610,6 @@ impl App {
 
                                 // integrity check the package
                                 let check = package::package_integrity_check_full(&mut file, Some(&info.filename), None);
-                                //TODO this creates a progress bar that isn't int he multibars
 
                                 if let Ok(check) = check && check.good() {
                                     // good!
@@ -2710,22 +2670,23 @@ impl App {
         // copy to the cache dir
         tracing::trace!("copying {} to {}", path, temp_path);
 
-        let filesize = get_filesize(path.as_str()).ok().unwrap_or(0);
-        let pbar = indicatif::ProgressBar::new(filesize);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
+        let filesize = get_filesize(path.as_str()).ok();
+        let bar = bpmutil::status::global().add_task(Some("copyfile"), filesize);
+        bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} caching package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
         ).unwrap());
 
         std::io::copy(
             &mut File::open(path)?,
-            &mut pbar.wrap_write(&mut File::create(&temp_path)?)
+            &mut bar.wrap_write(&mut File::create(&temp_path)?)
         ).context("failed to copy package file into cache")?;
 
-        pbar.finish_and_clear();
+        bar.finish_and_clear();
 
         // integrity check the package
         let mut file = std::fs::File::open(&temp_path)?;
+        //let check = package::package_integrity_check_full(&mut file, Some(filename), None, Some(&self.status));
         let check = package::package_integrity_check_full(&mut file, Some(filename), None);
 
         // the packagefile's hash, to be inserted into the cache for faster verification later
@@ -2752,53 +2713,8 @@ impl App {
     /// network: yes
     ///
     pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<(Utf8PathBuf, Option<String>)> {
-        Self::mt_cache_fetch_cmd2(self.filtered_providers(), &self.config.cache_dir, id, &MultiProgress::new())
+        Self::mt_cache_fetch_cmd2(self.filtered_providers(), &self.config.cache_dir, id)
     }
-
-//    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<Utf8PathBuf> {
-//        let providers : Vec<&provider::Provider> = self.filtered_providers().collect();
-//        Self::mt_cache_fetch_cmd(&providers, &self.config.cache_dir, id, &MultiProgress::new())
-//    }
-
-//    pub fn cache_fetch_cmd(&self, id: &PackageID) -> AResult<Utf8PathBuf> {
-//
-//        tracing::debug!(pkg=id.name, version=id.version, "cache fetch");
-//
-//        // ensure that we have the cache/packages dir
-//        std::fs::create_dir_all(join_path_utf8!(&self.config.cache_dir, "packages")).context("failed to create cache/packages dir")?;
-//
-//        let rand_str = Alphanumeric.sample_string(&mut rand::thread_rng(), 6);
-//        let temp_name = format!("{}{}_{}_{}_{}", TEMP_DOWNLOAD_PREFX, id.name, id.version, std::process::id(), rand_str);
-//        let temp_path = join_path_utf8!(&self.config.cache_dir, temp_name);
-//        let mut file = File::create(&temp_path)?;
-//
-//        for provider in self.filtered_providers() {
-//
-//            if let Ok(provider::ProviderFile{packages, ..}) = provider.load_file() {
-//                if let Some(pkg_info) = packages.packages.get(&id.name) {
-//                    if let Some(vlist) = pkg_info.versions.get(&id.version.as_str().into()) {
-//
-//                        for info in vlist.iter().filter(|ent| package::ArchMatcher::from(id.arch.as_deref()).matches(ent.arch.as_deref())) {
-//
-//                            let final_path = join_path_utf8!(&self.config.cache_dir, "packages", &info.filename);
-//
-//                            let result = provider.as_provide().fetch(&mut file, id, &info.uri, None);
-//                            if result.is_ok() {
-//                                file.sync_all()?;
-//                                drop(file);
-//                                tracing::trace!("moving fetched package file from {} to {}", temp_path, final_path);
-//                                std::fs::rename(&temp_path, &final_path).context("failed to move file")?;
-//                                //println!("final_path {:?}", final_path);
-//                                return Ok(final_path);
-//                            }
-//                        }
-//                    }
-//                }
-//            }
-//        }
-//
-//        Err(anyhow::anyhow!("failed to fetch package"))
-//    }
 
 } // impl App
 

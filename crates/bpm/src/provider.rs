@@ -2,16 +2,15 @@ use anyhow::Result;
 use camino::{Utf8PathBuf, Utf8Path};
 use crate::fetch::Fetch;
 use crate::join_path_utf8;
-use crate::search;
 use crate::source;
 use serde::Deserialize;
 use serde::Serialize;
-use std::fs::File;
 use tracing::trace;
 use std::io::Write;
 
 pub trait Provide: scan_result::Scan + Fetch + std::fmt::Debug {}
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Provider {
     pub name: String,
@@ -139,17 +138,17 @@ impl ProviderFilter {
         }
     }
 
-    pub fn included(&self, name: &str) -> bool {
-        let excluded = self.exclude.iter().any(|v| v == name);
-        let explicitly_included = self.include.iter().any(|v| v == name);
-        let implicitly_included = self.include.is_empty();
-
-        !excluded && (explicitly_included|| implicitly_included)
-    }
-
-    pub fn excluded(&self, name: &str) -> bool {
-        !self.included(name)
-    }
+//    pub fn included(&self, name: &str) -> bool {
+//        let excluded = self.exclude.iter().any(|v| v == name);
+//        let explicitly_included = self.include.iter().any(|v| v == name);
+//        let implicitly_included = self.include.is_empty();
+//
+//        !excluded && (explicitly_included|| implicitly_included)
+//    }
+//
+//    pub fn excluded(&self, name: &str) -> bool {
+//        !self.included(name)
+//    }
 
     //// this is non-ordered filtering
     //pub fn filter<'a>(&'a self, providers: &'a [Provider]) -> impl Iterator<Item=&'a Provider> {
@@ -223,7 +222,7 @@ mod test {
     struct FakeProvider {}
     impl Provide for FakeProvider {}
     impl Fetch for FakeProvider {
-        fn fetch(&self, write: &mut dyn Write, pkg: &package::PackageID, url: &str, bars: Option<&indicatif::MultiProgress>) -> Result<u64> {
+        fn fetch(&self, _write: &mut dyn Write, _pkg: &package::PackageID, _url: &str) -> Result<u64> {
             unreachable!()
         }
     }

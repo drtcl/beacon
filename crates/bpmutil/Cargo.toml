@@ -5,10 +5,15 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 camino = { workspace = true }
 humantime = { workspace = true }
 indicatif = { workspace = true }
+json = "0.12.4"
+serde_json = { workspace = true }
 static_assertions = { workspace = true }

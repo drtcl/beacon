@@ -1,12 +1,7 @@
-use std::collections::BTreeMap;
-
-use anyhow::Result;
-
 use std::rc::Rc;
-use serde::{Serialize, Deserialize};
+use version::Version;
 
-pub type PackageName = String;
-use version::{Version, VersionString};
+//pub type PackageName = String;
 pub type Url = String;
 pub type Filename = String;
 

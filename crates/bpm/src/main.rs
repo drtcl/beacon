@@ -1,30 +1,28 @@
-#![feature(let_chains)]
-#![feature(iter_collect_into)]
 #![feature(io_error_more)]
 #![feature(iter_chain)]
+#![feature(iter_collect_into)]
+#![feature(let_chains)]
 #![feature(thread_id_value)]
 
 #![allow(dead_code)]
 #![allow(unused_imports)]
-#![allow(unused_variables)]
+//#![allow(unused_variables)]
+//#![allow(unused_mut)]
 
-#![allow(unused_mut)]
-
+mod app;
+mod args;
 mod config;
-mod macros;
 mod db;
 mod fetch;
+mod macros;
 mod provider;
 mod search;
 mod source;
-mod app;
-mod args;
 
 use anyhow::Context;
 use anyhow::Result as AResult;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
-use std::io::Seek;
 use std::io::Write;
 use std::iter::Iterator;
 use std::path::{Path, PathBuf};
@@ -148,7 +146,7 @@ fn main() -> AResult<()> {
                     let in_use = matches.get_flag("in-use");
                     app.cache_evict(pkg, version, in_use)?;
                 },
-                Some(("list", matches)) => {
+                Some(("list", _matches)) => {
                     app.cache_list()?;
                 },
                 Some(("fetch", matches)) => {
