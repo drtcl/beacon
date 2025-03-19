@@ -16,6 +16,7 @@ pub struct StatusMgr {
     bars: MultiProgress,
     text: bool,
     next_id: Arc<AtomicU32>,
+    prefix: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -31,17 +32,18 @@ pub fn global() -> &'static StatusMgr {
     static INSTANCE : OnceLock<StatusMgr> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         let json_mode = "1" == std::env::var("BPM_JSON_PROGRESS").ok().as_deref().unwrap_or("");
-        StatusMgr::new(json_mode)
+        let prefix = std::env::var("BPM_PROGRESS_PREFIX").ok();
+        StatusMgr::new(json_mode, prefix)
     })
 }
 
-#[allow(dead_code)]
 impl StatusMgr {
-    pub fn new(textmode: bool) -> Self {
+    pub fn new(textmode: bool, prefix: Option<String>) -> Self {
         Self {
             bars: MultiProgress::new(),
             text: textmode,
             next_id: Arc::new(AtomicU32::new(0)),
+            prefix,
         }
     }
     pub fn add_task(&self, name: Option<impl Into<Cow<'static, str>>>, len: Option<u64>) -> Task {
@@ -62,9 +64,9 @@ impl StatusMgr {
             let style = indicatif::style::ProgressStyle::with_template("{bpm_custom_text_tracker}").unwrap()
                 .with_key("bpm_custom_text_tracker", TextTracker{
                     id,
-                    //task: "something"
                     task: name,
                     time: std::time::Instant::now(),
+                    prefix: self.prefix.clone(),
                 });
             bar.set_style(style);
         }
@@ -210,9 +212,9 @@ pub fn wrap_read<R: Read>(task: Option<&Task>, read: R) -> WrapRead<R> {
 #[derive(Clone)]
 struct TextTracker {
     id: u32,
-    //task: &'static str,
     task: Option<Cow<'static, str>>,
     time: std::time::Instant,
+    prefix: Option<String>,
 }
 
 impl indicatif::style::ProgressTracker for TextTracker {
@@ -246,7 +248,8 @@ impl indicatif::style::ProgressTracker for TextTracker {
                 "elapsed": elapsed,
                 "duration": duration,
             };
-            eprintln!("{}", json::stringify(json));
+            let prefix = self.prefix.as_deref().unwrap_or("");
+            eprintln!("{}{}", prefix, json::stringify(json));
         }
     }
     fn reset(&mut self, _state: &indicatif::ProgressState, _now: std::time::Instant) {
@@ -292,13 +295,13 @@ mod test {
 
     #[test]
     fn multibar() {
-        let mgr = StatusMgr::new(false);
+        let mgr = StatusMgr::new(false, Some("not seen".into()));
         bars(mgr);
     }
 
     #[test]
     fn textprog() {
-        let mgr = StatusMgr::new(true);
+        let mgr = StatusMgr::new(true, Some("PROGRESS::".into()));
         bars(mgr);
     }
 }
