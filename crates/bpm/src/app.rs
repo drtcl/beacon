@@ -845,6 +845,8 @@ impl App {
         let pkg = found.unwrap();
         let package_file_filename = pkg.package_file_filename.clone();
 
+        println!("Uninstalling {} {}", pkg.metadata.name, pkg.metadata.version);
+
         self.delete_package_files(pkg, verbose, remove_unowned)?;
         self.db.remove_package(pkg.metadata.id());
         if let Some(filename) = package_file_filename {
@@ -855,6 +857,8 @@ impl App {
             }
         }
         self.save_db()?;
+
+        println!("Uninstall complete");
 
         if self.config.cache_auto_clean {
             tracing::trace!("[uninstall] cache auto clean");
@@ -1581,10 +1585,20 @@ impl App {
         let location = pkg.location.as_ref().context("package has no install location")?;
         let location_full = location.full_path()?;
 
+        let count = pkg.metadata.files.len();
+
         let iter = pkg.metadata.files.iter().map(|(path, info)| {
             let path = join_path_utf8!(&location_full, path);
             (path, info)
         });
+
+        let delete_bar = bpmutil::status::global().add_task(Some(format!("uninstall {}", pkg.metadata.name)), Some(count as u64));
+        delete_bar.set_style(indicatif::ProgressStyle::with_template(
+            #[allow(clippy::literal_string_with_formatting_args)]
+            " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
+        ).unwrap());
+
+        let iter = delete_bar.wrap_iter(iter);
 
         Self::delete_files(iter, verbose, remove_unowned)
     }

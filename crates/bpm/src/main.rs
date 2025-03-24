@@ -96,15 +96,29 @@ fn find_config_file() -> AResult<Utf8PathBuf> {
 
 fn main() -> AResult<()> {
 
+    // nice for debugging
+    //let arg_log_path = std::env::current_exe().unwrap().with_file_name("bpm.log");
+    //let mut arg_log = std::fs::OpenOptions::new().create(true).append(true).open(&arg_log_path).expect("open log");
+    //let _ = arg_log.lock().expect("log file lock");
+    //use chrono::SubsecRound;
+    //let _ = write!(&mut arg_log, "{}", format!("{} {} {:?}\n",
+    //    chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
+    //    std::process::id(),
+    //    std::env::args().collect::<Vec<_>>()
+    //));
+
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .without_time()
         .with_max_level(tracing::Level::TRACE)
         .with_env_filter(tracing_subscriber::EnvFilter::from_env("BPM_LOG"))
+        //.with_writer(arg_log)
+        .with_writer(std::io::stderr)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let matches = args::get_cli().get_matches_from(wild::args());
+
 
     // shortcut to bpm-pack, no config file needed
     #[cfg(feature = "pack")]
