@@ -476,6 +476,19 @@ impl App {
         ).unwrap());
         bar.set_prefix(metadata.name.to_string());
 
+        let mut details = db::DbPkg::new(metadata.clone());
+        details.location = Some(install_dir);
+        details.versioning = versioning;
+        details.package_file_filename = Some(package_file_filename.to_string());
+
+        self.db.add_package(details);
+
+        self.db.cache_touch(package_file_filename, None);
+        self.db.cache_unuse_all_versions(pkg_name);
+        self.db.cache_set_in_use(package_file_filename, true);
+
+        self.save_db()?;
+
         #[cfg(unix)]
         let mut ro_dirs = HashMap::new();
 
@@ -545,19 +558,6 @@ impl App {
         }
 
         bar.finish_and_clear();
-
-        let mut details = db::DbPkg::new(metadata);
-        details.location = Some(install_dir);
-        details.versioning = versioning;
-        details.package_file_filename = Some(package_file_filename.to_string());
-
-        self.db.add_package(details);
-
-        self.db.cache_touch(package_file_filename, None);
-        self.db.cache_unuse_all_versions(pkg_name);
-        self.db.cache_set_in_use(package_file_filename, true);
-
-        self.save_db()?;
 
         println!("Installation complete");
 
