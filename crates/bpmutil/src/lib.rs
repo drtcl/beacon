@@ -99,8 +99,20 @@ impl<T:Write> Write for SlowWriter<T> {
 }
 
 /// open a file for use as a lockfile
-// write permission is required
+/// write permission is required
+/// will create parent directory if needed
 pub fn open_lockfile(path: &Utf8Path) -> Result<File> {
+
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            if std::fs::create_dir_all(parent).is_ok() {
+                tracing::debug!("created lockfile parent dir {}", parent);
+            } else {
+                tracing::warn!("could not create missing lockfile parent dir {}", parent);
+            }
+        }
+    }
+
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

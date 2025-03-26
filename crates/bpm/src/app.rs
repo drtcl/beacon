@@ -272,6 +272,17 @@ impl App {
     pub fn create_load_db(&mut self) -> AResult<()> {
 
         let db_path = Path::new(&self.config.db_file);
+
+        if let Some(parent) = db_path.parent() {
+            if !parent.exists() {
+                if std::fs::create_dir_all(parent).is_ok() {
+                    tracing::debug!("created db parent dir {}", parent.display());
+                } else {
+                    tracing::warn!("could not create missing db parent dir {}", parent.display());
+                }
+            }
+        }
+
         let exists = db_path
             .try_exists()
             .context("cannot access database file")?;

@@ -1,3 +1,4 @@
+#![feature(file_lock)]
 #![feature(io_error_more)]
 #![feature(iter_chain)]
 #![feature(iter_collect_into)]
