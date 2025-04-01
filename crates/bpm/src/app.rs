@@ -859,7 +859,9 @@ impl App {
         println!("Uninstalling {} {}", pkg.metadata.name, pkg.metadata.version);
 
         self.delete_package_files(pkg, verbose, remove_unowned)?;
+
         self.db.remove_package(pkg.metadata.id());
+
         if let Some(filename) = package_file_filename {
             self.db.cache_set_in_use(&filename, false);
 
@@ -867,6 +869,7 @@ impl App {
                 self.db.cache_touch(&filename, None);
             }
         }
+
         self.save_db()?;
 
         println!("Uninstall complete");
@@ -1516,7 +1519,7 @@ impl App {
 
                         mode |= 0o200;
                         perms.set_mode(mode);
-                        std::fs::set_permissions(parent_dir, perms)?;
+                        let _ = std::fs::set_permissions(parent_dir, perms);
                     }
                 }
             }
@@ -1554,27 +1557,24 @@ impl App {
             }
         }
 
-        // restore the permissions on any readonly dir that was modified during installation
         #[cfg(unix)]
-        for (dir, mode) in ro_dirs {
-            if let Some(mode) = mode {
-                let md = std::fs::metadata(&dir)?;
-                let mut perms = md.permissions();
-                perms.set_mode(mode);
-                std::fs::set_permissions(&dir, perms)?;
-            }
-        }
+        ro_dirs.retain(|_dir, mode| mode.is_some());
 
         dirs.reverse();
-        for path in dirs {
-            vout!(verbose, "delete {path}");
-            tracing::trace!("delete  {path}");
+        for dir in dirs {
 
-            let exists = matches!(path.try_exists(), Ok(true));
+            // don't need to restore dirs that are being removed
+            #[cfg(unix)]
+            ro_dirs.remove(&dir);
+
+            vout!(verbose, "delete {dir}");
+            tracing::trace!("delete  {dir}");
+
+            let exists = matches!(dir.try_exists(), Ok(true));
             let e = if remove_unowned {
-                std::fs::remove_dir_all(&path)
+                std::fs::remove_dir_all(&dir)
             } else {
-                let ret = std::fs::remove_dir(&path);
+                let ret = std::fs::remove_dir(&dir);
                 match ret {
                     Err(ref e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
                         Ok(())
@@ -1584,7 +1584,18 @@ impl App {
             };
 
             if let Err(e) = e && exists {
-                eprintln!("error deleting {path}: {e}");
+                eprintln!("error deleting {dir}: {e}");
+            }
+        }
+
+        // restore the permissions on any readonly dir that were modified
+        #[cfg(unix)]
+        for (dir, mode) in ro_dirs {
+            if let Some(mode) = mode {
+                let md = std::fs::metadata(&dir)?;
+                let mut perms = md.permissions();
+                perms.set_mode(mode);
+                let _ = std::fs::set_permissions(&dir, perms);
             }
         }
 
