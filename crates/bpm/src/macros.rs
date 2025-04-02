@@ -63,4 +63,22 @@ macro_rules! vout {
     };
 }
 
+#[macro_export]
+macro_rules! voutl {
+    ($level:expr, $verbose:expr, $msg:expr) => {
+        {
+            if $verbose >= $level {
+                println!($msg);
+            }
+        }
+    };
+    ($level:expr, $verbose:expr, $fmt:expr, $($arg:expr),*) => {
+        {
+            if $verbose >= $level {
+                println!($fmt, $($arg),*);
+            }
+        }
+    };
+}
+
 

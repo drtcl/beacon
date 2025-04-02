@@ -4,63 +4,117 @@ use indicatif::MultiProgress;
 use indicatif::ProgressBar;
 use indicatif::ProgressBarIter;
 use indicatif::ProgressStyle;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::SeqCst;
 use std::io::Write;
 use std::io::Read;
+use std::io::IsTerminal;
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct StatusMgr {
     bars: MultiProgress,
-    text: bool,
-    next_id: Arc<AtomicU32>,
+    //stderr: bool,
+    silent: bool,
+    json: bool,
     prefix: Option<String>,
+    next_id: AtomicU32,
 }
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct Task {
     inner: ProgressBar,
-    text: bool,
+    json: bool,
     id: u32,
-
 }
 
+const DEFAULT_PROGRESS_MODE_INTERACTIVE    : &str = "bars";
+const DEFAULT_PROGRESS_MODE_NONINTERACTIVE : &str = "silent";
+//const DEFAULT_PROGRESS_STREAM              : &str = "stderr";
+
+#[allow(clippy::wildcard_in_or_patterns)]
 pub fn global() -> &'static StatusMgr {
+
     static INSTANCE : OnceLock<StatusMgr> = OnceLock::new();
     INSTANCE.get_or_init(|| {
-        let json_mode = "1" == std::env::var("BPM_JSON_PROGRESS").ok().as_deref().unwrap_or("");
+
+        let mut json = false;
+        let mut silent = false;
+        let default_mode = if std::io::stderr().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
+
+        //let stderr;
+        //match std::env::var("BPM_PROGRESS_STREAM").ok().as_deref().unwrap_or(DEFAULT_PROGRESS_STREAM) {
+        //    "stdout" => {
+        //        stderr = false;
+        //        default_mode = if std::io::stdout().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
+        //    }
+        //    "stderr" | _ => {
+        //        stderr = true;
+        //        default_mode = if std::io::stderr().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
+        //    }
+        //}
+
+        match std::env::var("BPM_PROGRESS_MODE").ok().as_deref().unwrap_or(default_mode) {
+            "bar"    |
+            "bars"   => {}
+            "text"   |
+            "json"   => { json = true; }
+            "silent" |
+            "none"   |
+            "off"    => { silent = true; }
+            _        => { silent = true; }
+        }
+
         let prefix = std::env::var("BPM_PROGRESS_PREFIX").ok();
-        StatusMgr::new(json_mode, prefix)
+
+        //dbg!(silent, json, stderr);
+
+        StatusMgr::new(silent, json, prefix)
     })
 }
 
 impl StatusMgr {
-    pub fn new(textmode: bool, prefix: Option<String>) -> Self {
+    pub fn new(/*stderr: bool,*/ silent: bool, json: bool, prefix: Option<String>) -> Self {
+
+        let bars = MultiProgress::new();
+
+        if silent {
+            bars.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        }
+        //} else if stderr {
+        //    bars.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+        //} else {
+        //    bars.set_draw_target(indicatif::ProgressDrawTarget::stdout());
+        //}
+
         Self {
-            bars: MultiProgress::new(),
-            text: textmode,
-            next_id: Arc::new(AtomicU32::new(0)),
+            bars,
+            //stderr,
+            json,
+            silent,
+            next_id: AtomicU32::new(0),
             prefix,
         }
     }
-    pub fn add_task(&self, name: Option<impl Into<Cow<'static, str>>>, len: Option<u64>) -> Task {
+    pub fn add_task(&self,
+        name: Option<impl Into<Cow<'static, str>>>,
+        //package: Option<impl Into<Cow<'static, str>>>,
+        //version: Option<impl Into<Cow<'static, str>>>,
+        len: Option<u64>
+    ) -> Task {
 
         let bar = if let Some(len) = len {
-            ProgressBar::new(len)
+            self.bars.add(ProgressBar::new(len))
         } else {
-            ProgressBar::no_length()
+            self.bars.add(ProgressBar::no_length())
         };
 
-        let bar = self.bars.add(bar);
-        //bar.enable_steady_tick(std::time::Duration::from_millis(100));
         let id = self.next_id.fetch_add(1, SeqCst);
 
         let name = name.map(|v| v.into());
 
-        if self.text {
+        if !self.silent && self.json {
             let style = indicatif::style::ProgressStyle::with_template("{bpm_custom_text_tracker}").unwrap()
                 .with_key("bpm_custom_text_tracker", TextTracker{
                     id,
@@ -73,7 +127,7 @@ impl StatusMgr {
 
         Task {
             id, inner: bar,
-            text: self.text,
+            json: self.json,
         }
     }
 
@@ -101,7 +155,7 @@ impl Task {
     fn put_bar(&mut self, bar: ProgressBar) {
         let _old = std::mem::replace(&mut self.inner, bar);
     }
-    fn bar(&self) -> &ProgressBar {
+    pub fn bar(&self) -> &ProgressBar {
         &self.inner
     }
     pub fn id(&self) -> u32 {
@@ -132,7 +186,7 @@ impl Task {
         self.inner.finish_and_clear();
     }
     pub fn set_style(&self, style: ProgressStyle) {
-        if !self.text {
+        if !self.json {
             self.inner.set_style(style);
         }
     }

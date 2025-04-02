@@ -127,7 +127,8 @@ pub fn get_cli() -> Command {
                 .arg(arg!(--restore "Restore files that have been modified to original installation state. Does not restore volatile files."))
                 .arg(arg!(--"restore-volatile" "Also restore volatile files. No effect if --restore is not given"))
                 .arg(arg!(--mtime "Enable mtime verification"))
-                .arg(arg!(-v --verbose "Ouput extra information"))
+                .arg(arg!(-v --verbose "Ouput extra information").action(ArgAction::Count))
+                .arg(arg!(--"fail-fast" "Stop after finding first modified file. No effect if using --restore"))
         )
         //IDEA
         //.subcommand(

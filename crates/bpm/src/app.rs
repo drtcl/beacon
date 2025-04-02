@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_else_if)]
+
 use bpmutil::*;
 use chrono::SubsecRound;
 use crate::*;
@@ -25,6 +27,10 @@ use std::os::unix::fs::PermissionsExt;
 //TODO fastpath, pre-scan, pre-scan age limit, version it
 //TODO smartstring
 //
+//DONE verify --fail-fast
+//DONE verify progress reporting
+//DONE verify json output
+//..
 //DONE progress interface
 //DONE non-interactive/as-child-process progress reporting
 //DONE faster json parsing
@@ -530,7 +536,7 @@ impl App {
 
                             mode |= 0o200;
                             perms.set_mode(mode);
-                            std::fs::set_permissions(parent_dir, perms)?;
+                            let _ = std::fs::set_permissions(parent_dir, perms);
                         }
                     }
                 }
@@ -564,7 +570,7 @@ impl App {
                 let md = std::fs::metadata(&dir)?;
                 let mut perms = md.permissions();
                 perms.set_mode(mode);
-                std::fs::set_permissions(&dir, perms)?;
+                let _ = std::fs::set_permissions(&dir, perms);
             }
         }
 
@@ -1271,10 +1277,9 @@ impl App {
     /// For installed packages listed in the db,
     /// walk each file and hash the version we have on disk
     /// and compare that to the hash stored in the db.
-    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, restore_volatile: bool, verbose: bool, allow_mtime: bool) -> AResult<()>
+    pub fn verify_cmd<S>(&mut self, pkgs: &Vec<S>, restore: bool, restore_volatile: bool, fail_fast: bool, verbose: u8, allow_mtime: bool) -> AResult<()>
         where S: AsRef<str>,
     {
-
         self.exclusive_lock()?;
 
         tracing::trace!(restore=restore, restore_volatile=restore_volatile, "verify");
@@ -1303,14 +1308,21 @@ impl App {
             }
         });
 
-        // TODO could put progress bars in here
-
         let mut new_cache_files = Vec::new();
+
+        let mut report = BTreeMap::new();
 
         for pkg in db_iter {
 
+
+            let verify_bar = bpmutil::status::global().add_task(Some("verify"), Some(pkg.metadata.files.len() as u64));
+            verify_bar.set_style(indicatif::ProgressStyle::with_template(
+                &format!(" {{spinner:.green}} verify {} {{wide_bar:.green}} {{pos}}/{{len}} ", pkg.metadata.name)
+            ).unwrap());
+
+            verify_bar.bar().suspend(|| voutl!(1, verbose, "# {} {}", pkg.metadata.name, pkg.metadata.version));
+
             let mut pristine = true;
-            vout!(verbose, "# verifying package {}", pkg.metadata.name);
 
             let mut restore_files = HashSet::new();
 
@@ -1320,7 +1332,6 @@ impl App {
             for (filepath, fileinfo) in pkg.metadata.files.iter() {
 
                 let path = join_path_utf8!(&root_dir_full, filepath);
-                //println!("{}", path);
 
                 if fileinfo.volatile && !restore_volatile {
                     tracing::trace!("skipping volatile file {}::{}", &pkg.metadata.name, filepath);
@@ -1411,20 +1422,33 @@ impl App {
                 if modified {
                     pristine = false;
                     if state.missing {
-                        println!(" deleted   {}", &filepath);
+                        verify_bar.bar().suspend(|| voutl!(1, verbose, " D {}", &filepath));
                     } else {
-                        println!(" modified  {}", &filepath);
+                        verify_bar.bar().suspend(|| voutl!(1, verbose, " M {}", &filepath));
                     }
                     restore_files.insert(filepath.clone());
+                    if !restore && fail_fast {
+                        break;
+                    }
                 } else {
-                    vout!(verbose, "           {}", &filepath);
+                    if !restore {
+                        verify_bar.bar().suspend(|| voutl!(2, verbose, "   {}", &filepath));
+                    }
                 }
+
+                verify_bar.inc(1);
             }
 
-            println!("> {} -- {}", pkg.metadata.name, tern!(pristine, "OK", "MODIFIED"));
+            verify_bar.finish_and_clear();
 
-            //println!("restore_files {:?}", restore_files);
+            report.insert(pkg.metadata.name.clone(), tern!(pristine, "unmodified", "modified"));
+
             if restore && !restore_files.is_empty() {
+
+                let restore_bar = bpmutil::status::global().add_task(Some("restore"), Some(restore_files.len() as u64));
+                restore_bar.set_style(indicatif::ProgressStyle::with_template(
+                    &format!(" {{spinner:.green}} restore {} {{wide_bar:.cyan}} {{pos}}/{{len}} ", pkg.metadata.name)
+                ).unwrap());
 
                 let (is_new, path, hash) = self.cache_package_require(&PackageID{
                     name: pkg.metadata.name.clone(),
@@ -1459,7 +1483,10 @@ impl App {
                     if let Some(xpath) = restore_files.take(&path) {
                         let _ok = ent.unpack(full_path);
                         //dbg!(_ok);
-                        println!(" restored  {}", xpath);
+                        restore_bar.inc(1);
+                        restore_bar.bar().suspend(|| {
+                            voutl!(1, verbose, " R {}", xpath);
+                        });
                     }
 
                     // when there are no more files to restore, stop iterating the package
@@ -1468,8 +1495,19 @@ impl App {
                     }
                 }
 
-                println!("> {} -- RESTORED", pkg.metadata.name);
+                restore_bar.finish_and_clear();
+                report.insert(pkg.metadata.name.clone(), "restored");
             }
+        }
+
+        if !report.is_empty() {
+            let stdout = std::io::stdout();
+            if stdout.is_terminal() {
+                let _ = serde_json::to_writer_pretty(&mut std::io::stdout(), &report);
+            } else {
+                let _ = serde_json::to_writer(&mut std::io::stdout(), &report);
+            }
+            println!();
         }
 
         for (filename, hash, is_new) in new_cache_files {
@@ -1614,7 +1652,7 @@ impl App {
             (path, info)
         });
 
-        let delete_bar = bpmutil::status::global().add_task(Some(format!("uninstall {}", pkg.metadata.name)), Some(count as u64));
+        let delete_bar = bpmutil::status::global().add_task(Some("uninstall"), Some(count as u64));
         delete_bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "

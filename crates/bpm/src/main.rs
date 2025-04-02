@@ -255,16 +255,17 @@ fn main() -> AResult<()> {
             // --stop-on-first  option to stop on the first mismatch
             // --fail-fast?
 
-            let verbose = sub_matches.get_flag("verbose");
-            let restore = sub_matches.get_flag("restore");
+            let verbose          = sub_matches.get_count("verbose").clamp(0, 2);
+            let restore          = sub_matches.get_flag("restore");
             let restore_volatile = sub_matches.get_flag("restore-volatile");
-            let mtime   = sub_matches.get_flag("mtime");
+            let fail_fast        = sub_matches.get_flag("fail-fast");
+            let mtime            = sub_matches.get_flag("mtime");
 
             let pkg_names = sub_matches
                 .get_many::<String>("pkg")
                 .map_or(Vec::new(), |given| given.collect());
 
-            app.verify_cmd(&pkg_names, restore, restore_volatile, verbose, mtime)?;
+            app.verify_cmd(&pkg_names, restore, restore_volatile, fail_fast, verbose, mtime)?;
         }
         Some(("search", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
