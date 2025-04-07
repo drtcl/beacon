@@ -33,7 +33,7 @@ impl Fetch for Http {
         let size = httpsearch::get_size(None, url).ok();
 
         let status_mgr = bpmutil::status::global();
-        let mut bar = status_mgr.add_task(Some(format!("download {}", pkg.name)), size);
+        let mut bar = status_mgr.add_task(Some("download"), Some(pkg.name.as_str()), size);
         bar.set_message(msg);
         bar.set_prefix("✓");
         if size.is_some() {

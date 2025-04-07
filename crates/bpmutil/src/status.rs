@@ -1,24 +1,32 @@
-use std::sync::OnceLock;
-use std::borrow::Cow;
 use indicatif::MultiProgress;
 use indicatif::ProgressBar;
 use indicatif::ProgressBarIter;
 use indicatif::ProgressStyle;
+use indicatif::style::ProgressTracker;
+use std::borrow::Cow;
+use std::io::IsTerminal;
+use std::io::Read;
+use std::io::Write;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::SeqCst;
-use std::io::Write;
-use std::io::Read;
-use std::io::IsTerminal;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+const DEFAULT_PROGRESS_MODE_INTERACTIVE    : &str = "bars";
+const DEFAULT_PROGRESS_MODE_NONINTERACTIVE : &str = "silent";
+const DEFAULT_PROGRESS_PERIOD : Duration = Duration::from_millis(250);
+const DEFAULT_PROGRESS_STREAM              : &str = "stderr";
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct StatusMgr {
     bars: MultiProgress,
-    //stderr: bool,
+    stderr: bool,
     silent: bool,
     json: bool,
     prefix: Option<String>,
     next_id: AtomicU32,
+    period: Duration,
 }
 
 #[allow(dead_code)]
@@ -27,11 +35,8 @@ pub struct Task {
     inner: ProgressBar,
     json: bool,
     id: u32,
+    stderr: bool,
 }
-
-const DEFAULT_PROGRESS_MODE_INTERACTIVE    : &str = "bars";
-const DEFAULT_PROGRESS_MODE_NONINTERACTIVE : &str = "silent";
-//const DEFAULT_PROGRESS_STREAM              : &str = "stderr";
 
 #[allow(clippy::wildcard_in_or_patterns)]
 pub fn global() -> &'static StatusMgr {
@@ -41,19 +46,19 @@ pub fn global() -> &'static StatusMgr {
 
         let mut json = false;
         let mut silent = false;
-        let default_mode = if std::io::stderr().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
 
-        //let stderr;
-        //match std::env::var("BPM_PROGRESS_STREAM").ok().as_deref().unwrap_or(DEFAULT_PROGRESS_STREAM) {
-        //    "stdout" => {
-        //        stderr = false;
-        //        default_mode = if std::io::stdout().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
-        //    }
-        //    "stderr" | _ => {
-        //        stderr = true;
-        //        default_mode = if std::io::stderr().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
-        //    }
-        //}
+        let stderr;
+        let default_mode;
+        match std::env::var("BPM_PROGRESS_STREAM").ok().as_deref().unwrap_or(DEFAULT_PROGRESS_STREAM) {
+            "stdout" => {
+                stderr = false;
+                default_mode = if std::io::stdout().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
+            }
+            "stderr" | _ => {
+                stderr = true;
+                default_mode = if std::io::stderr().is_terminal() { DEFAULT_PROGRESS_MODE_INTERACTIVE } else { DEFAULT_PROGRESS_MODE_NONINTERACTIVE };
+            }
+        }
 
         match std::env::var("BPM_PROGRESS_MODE").ok().as_deref().unwrap_or(default_mode) {
             "bar"    |
@@ -66,41 +71,44 @@ pub fn global() -> &'static StatusMgr {
             _        => { silent = true; }
         }
 
+        let period = std::env::var("BPM_PROGRESS_PERIOD").ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_PROGRESS_PERIOD);
+
         let prefix = std::env::var("BPM_PROGRESS_PREFIX").ok();
 
-        //dbg!(silent, json, stderr);
-
-        StatusMgr::new(silent, json, prefix)
+        StatusMgr::new(stderr, silent, json, prefix, period)
     })
 }
 
 impl StatusMgr {
-    pub fn new(/*stderr: bool,*/ silent: bool, json: bool, prefix: Option<String>) -> Self {
+    pub fn new(stderr: bool, silent: bool, json: bool, prefix: Option<String>, period: Duration) -> Self {
 
         let bars = MultiProgress::new();
 
         if silent {
             bars.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        } else if stderr {
+            bars.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+        } else {
+            bars.set_draw_target(indicatif::ProgressDrawTarget::stdout());
         }
-        //} else if stderr {
-        //    bars.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-        //} else {
-        //    bars.set_draw_target(indicatif::ProgressDrawTarget::stdout());
-        //}
 
         Self {
             bars,
-            //stderr,
+            stderr,
             json,
             silent,
             next_id: AtomicU32::new(0),
             prefix,
+            period,
         }
     }
-    pub fn add_task(&self,
+
+    pub fn add_task<'a>(&self,
         name: Option<impl Into<Cow<'static, str>>>,
-        //package: Option<impl Into<Cow<'static, str>>>,
-        //version: Option<impl Into<Cow<'static, str>>>,
+        package: Option<impl Into<Cow<'a, str>>>,
         len: Option<u64>
     ) -> Task {
 
@@ -115,19 +123,29 @@ impl StatusMgr {
         let name = name.map(|v| v.into());
 
         if !self.silent && self.json {
-            let style = indicatif::style::ProgressStyle::with_template("{bpm_custom_text_tracker}").unwrap()
-                .with_key("bpm_custom_text_tracker", TextTracker{
-                    id,
-                    task: name,
-                    time: std::time::Instant::now(),
-                    prefix: self.prefix.clone(),
-                });
+
+            let tt = TextTracker{
+                id,
+                task: name,
+                package: package.map(|p| p.into().into_owned()),
+                time: std::time::Instant::now(),
+                prefix: self.prefix.clone(),
+                period: self.period,
+                new: true,
+                stderr: self.stderr,
+            };
+
+            let style = ProgressStyle::with_template("{bpm_custom_text_tracker}")
+                .unwrap()
+                .with_key("bpm_custom_text_tracker", tt);
+
             bar.set_style(style);
         }
 
         Task {
             id, inner: bar,
             json: self.json,
+            stderr: self.stderr,
         }
     }
 
@@ -190,7 +208,7 @@ impl Task {
             self.inner.set_style(style);
         }
     }
-    pub fn enable_steady_tick(&self, interval: std::time::Duration) {
+    pub fn enable_steady_tick(&self, interval: Duration) {
         self.inner.enable_steady_tick(interval)
     }
     pub fn disable_steady_tick(&self) {
@@ -269,13 +287,32 @@ struct TextTracker {
     task: Option<Cow<'static, str>>,
     time: std::time::Instant,
     prefix: Option<String>,
+    period: Duration,
+    new: bool,
+    stderr: bool,
+    package: Option<String>,
 }
 
-impl indicatif::style::ProgressTracker for TextTracker {
-    fn clone_box(&self) -> Box<dyn indicatif::style::ProgressTracker> {
+impl ProgressTracker for TextTracker {
+
+    fn clone_box(&self) -> Box<dyn ProgressTracker> {
         Box::new(self.clone())
     }
-    fn tick(&mut self, state: &indicatif::ProgressState, _now: std::time::Instant) {
+
+    fn tick(&mut self, state: &indicatif::ProgressState, now: std::time::Instant) {
+
+        let mut print = false;
+        if self.new {
+            print = true;
+        } else if self.time.elapsed() > self.period {
+            print = true;
+            self.time = now;
+        }
+
+        if !print {
+            return;
+        }
+
         let task_id = self.id;
         let task_name = self.task.as_deref().unwrap_or("null");
         let pos = state.pos();
@@ -283,32 +320,51 @@ impl indicatif::style::ProgressTracker for TextTracker {
         let duration = state.duration().as_secs();
         let elapsed = state.elapsed().as_secs();
         let eta = state.eta().as_secs();
-        //let per_sec = state.per_sec();
-        let mut print = false;
-        if self.time.elapsed() > std::time::Duration::from_millis(250) {
-            print = true;
-            self.time = _now;
-        }
-        if !print && (pos == len) {
-            print = true;
-        }
-        if print {
-            let json = json::object!{
-                "id": task_id,
-                "name": task_name,
-                "pos": pos,
-                "len": len,
-                "eta": eta,
-                "elapsed": elapsed,
-                "duration": duration,
-            };
-            let prefix = self.prefix.as_deref().unwrap_or("");
-            eprintln!("{}{}", prefix, json::stringify(json));
+        let rate = state.per_sec();
+
+        let event = if self.new {
+            self.new = false;
+            "start"
+        } else {
+            "update"
+        };
+
+        let json = json::stringify(json::object!{
+            "id": task_id,
+            "event": event,
+            "name": task_name,
+            "package": self.package.as_deref().unwrap_or(""),
+            "pos": pos,
+            "len": len,
+            "eta": eta,
+            "elapsed": elapsed,
+            "rate": rate,
+            "duration": duration,
+        });
+        let prefix = self.prefix.as_deref().unwrap_or("");
+        if self.stderr {
+            eprintln!("{}{}", prefix, json);
+        } else {
+            println!("{}{}", prefix, json);
         }
     }
+
     fn reset(&mut self, _state: &indicatif::ProgressState, _now: std::time::Instant) {
     }
+
     fn write(&self, _state: &indicatif::ProgressState, _w: &mut dyn std::fmt::Write) {
+    }
+}
+
+impl Drop for TextTracker {
+    fn drop(&mut self) {
+        let task_id = self.id;
+        let prefix = self.prefix.as_deref().unwrap_or("");
+        if self.stderr {
+            eprintln!("{prefix}{{\"id\":{task_id},\"event\":\"end\"}}");
+        } else {
+            println!("{prefix}{{\"id\":{task_id},\"event\":\"end\"}}");
+        }
     }
 }
 

@@ -732,9 +732,9 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let file_included_count = file_list.files.iter().filter(|ent| !ent.ignore).count() as u64;
 
     let status_mgr = bpmutil::status::global();
-    let size_bar  = status_mgr.add_task(Some("packing"), Some(file_size_sum));
-    let count_bar = status_mgr.add_task(Some("files"), Some(file_included_count));
-    let comp_bar  = status_mgr.add_task(Some("compressing"), Some(0));
+    let size_bar  = status_mgr.add_task(Some("packing"), None::<&str>, Some(file_size_sum));
+    let count_bar = status_mgr.add_task(Some("files"), None::<&str>, Some(file_included_count));
+    let comp_bar  = status_mgr.add_task(Some("compressing"), None::<&str>, Some(0));
     size_bar.enable_steady_tick(Duration::from_millis(200));
     size_bar.set_style(ProgressStyle::with_template(
         " {spinner:.green} packing files   {elapsed}/{duration}   {bytes_per_sec}   {bytes}/{total_bytes} "
@@ -932,7 +932,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     //meta.to_writer(&mut b);
     //println!("{}", String::from_utf8_lossy(&b));
 
-    let finish_bar = status_mgr.add_task(Some("finish"), Some(compressed_size + meta_data_size));
+    let finish_bar = status_mgr.add_task(Some("finish"), None::<&str>, Some(compressed_size + meta_data_size));
     finish_bar.enable_steady_tick(Duration::from_millis(200));
     finish_bar.set_style(ProgressStyle::with_template(" {spinner:.green} writing package {wide_bar:.green/white} {bytes}/{total_bytes}").unwrap());
 

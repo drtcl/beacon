@@ -49,7 +49,7 @@ impl Fetch for FileSystem {
         let file_size = file.metadata().ok().map(|m| m.file_size());
 
         let status_mgr = bpmutil::status::global();
-        let mut bar = status_mgr.add_task(Some(format!("download {}", pkg.name)), file_size);
+        let mut bar = status_mgr.add_task(Some("download"), Some(pkg.name.as_str()), file_size);
         bar.set_message(msg);
         bar.set_prefix("✓");
 

@@ -486,7 +486,7 @@ impl App {
         let mut zstd = zstd::stream::read::Decoder::new(&mut inner_tar)?;
         let mut data_tar = tar::Archive::new(&mut zstd);
 
-        let bar = bpmutil::status::global().add_task(Some("install"), Some(metadata.files.len() as u64));
+        let bar = bpmutil::status::global().add_task(Some("install"), Some(metadata.name.as_str()), Some(metadata.files.len() as u64));
         bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             "   {msg}\n {spinner:.green} installing {prefix} {wide_bar:.green} {pos}/{len} "
@@ -938,6 +938,7 @@ impl App {
 
         let delete_thread = std::thread::spawn({
             let location_full = location_full.clone();
+            let pkg_name = pkg_name.to_string();
             move || {
 
                 let iter = remove_files.iter().map(|(path, info)| {
@@ -945,7 +946,7 @@ impl App {
                     (path, info)
                 });
 
-                let delete_bar = bpmutil::status::global().add_task(Some("delete"), Some(remove_files.len() as u64));
+                let delete_bar = bpmutil::status::global().add_task(Some("delete"), Some(pkg_name), Some(remove_files.len() as u64));
                 delete_bar.set_style(indicatif::ProgressStyle::with_template(
                     #[allow(clippy::literal_string_with_formatting_args)]
                     " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
@@ -960,7 +961,7 @@ impl App {
             }
         });
 
-        let diff_bar = bpmutil::status::global().add_task(Some("diff"), Some(new_files.len() as u64));
+        let diff_bar = bpmutil::status::global().add_task(Some("diff"), Some(pkg_name.to_string()), Some(new_files.len() as u64));
         diff_bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} diffing  {wide_bar:.blue} {pos}/{len} "
@@ -1054,7 +1055,7 @@ impl App {
             anyhow::bail!("Error in file deletion thread");
         }
 
-        let update_bar = bpmutil::status::global().add_task(Some("update"), Some((new_files.len() - skip_files.len()) as u64));
+        let update_bar = bpmutil::status::global().add_task(Some("update"), Some(pkg_name), Some((new_files.len() - skip_files.len()) as u64));
         update_bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             "   {msg}\n {spinner:.green} updating {wide_bar:.green} {pos}/{len} "
@@ -1314,8 +1315,7 @@ impl App {
 
         for pkg in db_iter {
 
-
-            let verify_bar = bpmutil::status::global().add_task(Some("verify"), Some(pkg.metadata.files.len() as u64));
+            let verify_bar = bpmutil::status::global().add_task(Some("verify"), Some(pkg.metadata.name.as_str()), Some(pkg.metadata.files.len() as u64));
             verify_bar.set_style(indicatif::ProgressStyle::with_template(
                 &format!(" {{spinner:.green}} verify {} {{wide_bar:.green}} {{pos}}/{{len}} ", pkg.metadata.name)
             ).unwrap());
@@ -1440,12 +1440,13 @@ impl App {
             }
 
             verify_bar.finish_and_clear();
+            drop(verify_bar);
 
             report.insert(pkg.metadata.name.clone(), tern!(pristine, "unmodified", "modified"));
 
             if restore && !restore_files.is_empty() {
 
-                let restore_bar = bpmutil::status::global().add_task(Some("restore"), Some(restore_files.len() as u64));
+                let restore_bar = bpmutil::status::global().add_task(Some("restore"), Some(pkg.metadata.name.as_str()), Some(restore_files.len() as u64));
                 restore_bar.set_style(indicatif::ProgressStyle::with_template(
                     &format!(" {{spinner:.green}} restore {} {{wide_bar:.cyan}} {{pos}}/{{len}} ", pkg.metadata.name)
                 ).unwrap());
@@ -1652,7 +1653,7 @@ impl App {
             (path, info)
         });
 
-        let delete_bar = bpmutil::status::global().add_task(Some("uninstall"), Some(count as u64));
+        let delete_bar = bpmutil::status::global().add_task(Some("uninstall"), Some(pkg.metadata.name.as_str()), Some(count as u64));
         delete_bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} remove   {wide_bar:.red} {pos}/{len} "
@@ -2745,7 +2746,7 @@ impl App {
         tracing::trace!("copying {} to {}", path, temp_path);
 
         let filesize = get_filesize(path.as_str()).ok();
-        let bar = bpmutil::status::global().add_task(Some("copyfile"), filesize);
+        let bar = bpmutil::status::global().add_task(Some("copyfile"), Some(filename), filesize);
         bar.set_style(indicatif::ProgressStyle::with_template(
             #[allow(clippy::literal_string_with_formatting_args)]
             " {spinner:.green} caching package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "

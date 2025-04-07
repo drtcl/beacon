@@ -380,7 +380,7 @@ pub fn package_integrity_check_full(
     let filesize = pkg_file.metadata().ok().map(|v| v.len());
 
     let status = bpmutil::status::global();
-    let bar = status.add_task(Some("verify_package"), filesize);
+    let bar = status.add_task(Some("verify_package"), file_name, filesize);
     bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying package {wide_bar:.blue} ").unwrap());
 
     let mut ret = CheckResult::default();
@@ -450,7 +450,7 @@ pub fn package_integrity_check_full(
         let mut tar = tar::Archive::new(&mut pkg_file);
         let (mut data, size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
 
-        let bar = status.add_task(Some("verify_data"), Some(size));
+        let bar = status.add_task(Some("verify_data"), file_name, Some(size));
         bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying data    {wide_bar:.blue} ").unwrap());
 
         let mut read = bar.wrap_read(&mut data);
@@ -467,7 +467,7 @@ pub fn package_integrity_check_full(
     // check the file list
     pkg_file.rewind()?;
 
-    let bar = status.add_task(Some("verify_files"), Some(meta_filelist.len() as u64));
+    let bar = status.add_task(Some("verify_files"), file_name, Some(meta_filelist.len() as u64));
     bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying files   {wide_bar:.blue} ").unwrap());
 
     let mut outer_tar = tar::Archive::new(pkg_file);
