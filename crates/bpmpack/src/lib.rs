@@ -9,7 +9,7 @@
 // tar the hashes and data tarball into a single package tarball
 // cleanup intermediate files
 
-//TODO given:
+//  given:
 //     a/
 //       b/
 //         c/
@@ -33,7 +33,7 @@
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use ignore::gitignore::Gitignore;
-use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
+use indicatif::ProgressStyle;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::File;
@@ -439,6 +439,7 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
 
     let require_semver = *matches.get_one::<bool>("semver").unwrap();
     let package_version = Version::new(matches.get_one::<String>("version").unwrap());
+    let package_arch = matches.get_one::<String>("arch").map(|s| s.as_str());
     let package_filepath = matches.get_one::<String>("pkgfile").unwrap();
     let package_filepath = Utf8PathBuf::from_path_buf(PathBuf::from(package_filepath)).expect("failed to get file path");
     let package_filename = package_filepath.file_name().context("failed to get filename")?;
@@ -454,19 +455,28 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
         anyhow::bail!("no such file");
     }
 
-    if let Some((name, _version)) = package::split_parts(package_filename) {
+    if let Some((name, _version, arch)) = package::split_parts(package_filename) {
+
+        if arch.is_some() && arch != package_arch {
+            println!("warning: arch changing from '{}' to '{}'.", arch.unwrap(), package_arch.unwrap_or(""));
+        }
+
+        let package_arch = package_arch.or(arch);
+        if !package::is_valid_arch(package_arch) {
+            anyhow::bail!("invalid arch");
+        }
 
         //if _version != "unversioned" {
             //anyhow::bail!("refusing to set the version of an already versioned package");
         //}
 
-        let new_filename = package::make_packagefile_name(name, &package_version);
+        let new_filename = package::make_packagefile_name(name, &package_version, package_arch);
         let new_filepath = package_filepath.with_file_name(new_filename);
 
-        let out_file = std::fs::File::create(new_filepath).context("failed to open file for writing")?;
+        let out_file = std::fs::File::create(&new_filepath).context("failed to open file for writing")?;
         let mut out_tar = tar::Builder::new(out_file);
 
-        let in_file = std::fs::File::open(package_filepath).context("failed to open file for reading")?;
+        let in_file = std::fs::File::open(&package_filepath).context("failed to open file for reading")?;
         let mut tar = tar::Archive::new(in_file);
 
         for mut entry in tar.entries().context("failed to read tar")?.flatten() {
@@ -478,8 +488,10 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
                 // extract the MetaData struct
                 let mut md = package::MetaData::from_reader(&mut entry).context("failed to extra metadata")?;
 
-                // update the version
+                // update the version, arch, and create a new uuid
                 md.version = package_version.to_string();
+                md.arch = package_arch.map(String::from);
+                md.uuid = uuid::Uuid::new_v4().to_string();
 
                 // re-serialize the struct and write that to the tar
                 let mut md_file = Vec::new();
@@ -499,18 +511,34 @@ pub fn subcmd_set_version(matches: &clap::ArgMatches) -> Result<()> {
         let mut out_file = out_tar.into_inner()?;
         out_file.flush()?;
         drop(out_file);
+
+        println!("Package created: {}", new_filepath);
     }
 
     Ok(())
 }
 
-pub fn subcmd_list_files(file: &Path) -> Result<()> {
+pub fn subcmd_verify(path: &Path) -> Result<()> {
 
-    let mut file = std::fs::File::open(file).context("failed to open package file")?;
+    if let Ok(true) = std::fs::exists(path) {
+    } else {
+        anyhow::bail!("file path does not exist");
+    }
 
-    package::package_integrity_check(&mut file)?;
+    let mut file = std::fs::File::open(path).context("failed to open package file")?;
 
-    file.rewind()?;
+    let filename = path.file_name().context("path has no filename")?.to_string_lossy();
+
+    let check = package::package_integrity_check_full(&mut file, Some(&filename), None)?;
+    if !check.good() {
+        anyhow::bail!("package corrupt");
+    }
+    Ok(())
+}
+
+pub fn subcmd_list_files(path: &Path) -> Result<()> {
+
+    let file = std::fs::File::open(path).context("failed to open package file")?;
 
     let mut tar = tar::Archive::new(file);
     let (data, _size) = package::seek_to_tar_entry(package::DATA_FILE_NAME, &mut tar)?;
@@ -669,6 +697,11 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         package_version
     };
 
+    let package_arch = matches.get_one::<String>("arch").map(|s| s.as_str());
+    if !package::is_valid_arch(package_arch) {
+        anyhow::bail!("invalid arch");
+    }
+
     let given_file_paths = matches.get_many::<String>("file").unwrap().cloned().collect();
     let file_list = gather_files(given_file_paths, wrap_with_dir, &ignore, &mode_matcher)?;
 
@@ -676,7 +709,8 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // - data - all target file in the package
     // - meta - meta data about data files
 
-    let package_file_path = PathBuf::from(&output_dir).join(package::make_packagefile_name(package_name, package_version.as_str()));
+    let package_filename = package::make_packagefile_name(package_name, package_version.as_str(), package_arch);
+    let package_file_path = PathBuf::from(&output_dir).join(&package_filename);
 
     // scan the file list and verify symlinks
     let symlink_settings = SymlinkSettings {
@@ -688,29 +722,30 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // -- progress bars --
     //                 _____________________________________________________________________
     //  size_bar       | .: packing files     5s/20s         32 MiB/s     120MiB / 1GiB    |
-    //  count_bar      |    file 37/1000 [==============================              ]    |
+    //  count_bar      |    file 370/1000 [===========                                   ] |
     //  comp_bar       |    compression  [==            ] 5MiB / 120MiB                    |
     //  (then later)   |                                                                   |
     //  finish_bar     |    writing package [===============            ] 25MiB / 50MiB    |
     //                 ---------------------------------------------------------------------
 
-    let bars = MultiProgress::new();
-
     let file_size_sum = file_list.files.iter().filter(|ent| !ent.ignore).map(|ent| ent.size).sum::<u64>();
     let file_included_count = file_list.files.iter().filter(|ent| !ent.ignore).count() as u64;
 
-    let size_bar = bars.add(ProgressBar::new(file_size_sum));
-    let count_bar = bars.add(ProgressBar::new(file_included_count));
-    let comp_bar = bars.add(ProgressBar::new(0));
+    let status_mgr = bpmutil::status::global();
+    let size_bar  = status_mgr.add_task(Some("packing"), None::<&str>, Some(file_size_sum));
+    let count_bar = status_mgr.add_task(Some("files"), None::<&str>, Some(file_included_count));
+    let comp_bar  = status_mgr.add_task(Some("compressing"), None::<&str>, Some(0));
     size_bar.enable_steady_tick(Duration::from_millis(200));
     size_bar.set_style(ProgressStyle::with_template(
         " {spinner:.green} packing files   {elapsed}/{duration}   {bytes_per_sec}   {bytes}/{total_bytes} "
     ).unwrap());
     count_bar.set_style(ProgressStyle::with_template(
+        #[allow(clippy::literal_string_with_formatting_args)]
         "   file {pos}/{len} {wide_bar:.green} ").unwrap()
     );
     comp_bar.set_style(ProgressStyle::with_template(
-        "   compression  {percent}%  {bytes} / {total_bytes} {bar:25} "
+        #[allow(clippy::literal_string_with_formatting_args)]
+        "   compression ratio {percent}%  {bytes} / {total_bytes} {bar:25} "
     ).unwrap());
 
     // layers of wrapping:
@@ -756,11 +791,11 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     let mut meta = package::MetaData::new(package::PackageID {
             name: package_name.clone(),
             version: package_version.to_string(),
+            arch: package_arch.map(String::from),
         })
         .with_description(description)
         .with_kv(kv)
         .with_uuid(uuid::Uuid::new_v4().to_string());
-
 
     // insert dependencies
     for pair in &deps {
@@ -786,7 +821,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
                     }
                 }
                 if !parent_ignored {
-                    bars.suspend(|| println!("I \t{}", entry.pkg_path));
+                    status_mgr.suspend(|| println!("I \t{}", entry.pkg_path));
                 }
 
                 if entry.is_dir() {
@@ -838,7 +873,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
         }
 
         if verbose {
-            bars.suspend(|| {
+            status_mgr.suspend(|| {
                 println!("A{}{}{}{} \t{}",
                     if entry.is_dir()       { "d" } else { "" },
                     if entry.is_symlink()   { "s" } else { "" },
@@ -897,8 +932,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     //meta.to_writer(&mut b);
     //println!("{}", String::from_utf8_lossy(&b));
 
-    let finish_bar = ProgressBar::new(compressed_size + meta_data_size);
-    let finish_bar = bars.add(finish_bar);
+    let finish_bar = status_mgr.add_task(Some("finish"), None::<&str>, Some(compressed_size + meta_data_size));
     finish_bar.enable_steady_tick(Duration::from_millis(200));
     finish_bar.set_style(ProgressStyle::with_template(" {spinner:.green} writing package {wide_bar:.green/white} {bytes}/{total_bytes}").unwrap());
 
@@ -954,15 +988,20 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     //println!("{:#?}", {let mut x = meta.clone(); x.files.clear(); x});
 
+    //println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
+    println!("package name:           {}", package_name);
+    println!("package version:        {}", package_version);
+    //println!("package arch:           {}", package_arch.map_or("noarch", |s| s.as_str()));
+    println!("package arch:           {}", package_arch.unwrap_or("noarch"));
+    println!("package filename:       {}", package_filename);
+    println!("package hash [blake3]:  {}", package_hash);
+    println!("package size:           {:-10} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
     println!("data file count:        {}", file_included_count);
-    println!("data size uncompressed: {} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
-    println!("data size compressed:   {} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
+    println!("data size uncompressed: {:-10} ({})", humansize::format_size(uncompressed_size, humansize::BINARY), uncompressed_size);
+    println!("data size compressed:   {:-10} ({})", humansize::format_size(compressed_size, humansize::BINARY), compressed_size);
     println!("data compression:       {:.4}, {:0.3} %", uncompressed_size as f64 / compressed_size as f64, 100.0 * compressed_size as f64 / uncompressed_size as f64);
     println!("data hash [blake3]:     {}", data_tar_hash);
-    println!("package hash [blake3]:  {}", package_hash);
-    println!("package size:           {} ({})", humansize::format_size(package_size, humansize::BINARY), package_size);
-    //println!("package size:           {} ({}), {:0.3} %", humansize::format_size(package_size, humansize::BINARY), package_size, 100.0 * package_size as f64 / uncompressed_size as f64);
-    println!("Package created at {}", std::fs::canonicalize(package_file_path.as_path())?.display());
+    println!("package created at:     {}", std::fs::canonicalize(package_file_path.as_path())?.display());
 
     Ok(())
 }
@@ -1223,6 +1262,11 @@ pub fn main_cli(matches: &clap::ArgMatches) -> Result<()> {
         Some(("list-files", matches)) => {
             let file = matches.get_one::<String>("pkgfile").unwrap();
             subcmd_list_files(Path::new(file))?;
+            std::process::exit(0);
+        },
+        Some(("verify", matches)) => {
+            let file = matches.get_one::<String>("pkgfile").unwrap();
+            subcmd_verify(Path::new(file))?;
             std::process::exit(0);
         },
         Some(("test-ignore", matches)) => {

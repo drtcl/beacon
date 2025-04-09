@@ -1,6 +1,6 @@
 [package]
 name = "bpm"
-version = "0.2.9-alpha"
+version = "0.3.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -22,12 +22,13 @@ anyhow = { workspace = true }
 blake3 = { workspace = true }
 camino = { workspace = true, features = ["serde1"] }
 chrono = { workspace = true, features = ["serde"] }
-clap = { workspace = true, features = ["cargo"] }
+clap = { workspace = true, features = ["cargo", "color"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
 directories = { workspace = true }
 humantime = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }
+rand = { workspace = true }
 regex = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"]}
@@ -42,11 +43,14 @@ version-compare = { workspace = true }
 walkdir = { workspace = true }
 wild = { workspace = true }
 zstd = { workspace = true, features = ["zstdmt"] }
+indexmap = { version = "2.7.1", features = ["serde"] }
 
 [features]
 default = ["pack", "rustls", "swiss"]
 pack = ["dep:bpmpack"]
 swiss = ["dep:swiss"]
+dev-debug = []
+dev-debug-slow = []
 
 # httpsearch tls options
 rustls = ["httpsearch/rustls"]

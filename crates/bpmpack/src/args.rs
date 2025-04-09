@@ -23,7 +23,13 @@ pub fn build_cli(cmd: clap::Command) -> clap::Command {
                 .arg(arg!(--version <version> "The package's version")
                     .required(true)
                 )
+                .arg(arg!(--arch <arch> "Architecture of this package"))
                 .arg(arg!(--semver "Require the version to be a valid semver [see http://semver.org]"))
+        )
+        .subcommand(
+            Command::new("verify")
+                .about("Verify package integrity")
+                .arg(arg!(<pkgfile> "package file to inspect"))
         )
         .subcommand(
             Command::new("list-files")
@@ -63,6 +69,7 @@ pub fn build_cli(cmd: clap::Command) -> clap::Command {
         .arg(arg!(--unversioned "Build a package without a version. The package will be invalid until versioned later.")
             .conflicts_with("version")
         )
+        .arg(arg!(--arch <arch> "Architecture of this package"))
         .arg(arg!(--mount <mount> "The packages mount point, where to install into"))
         .arg(arg!(--"ignore-file" <path> "Use an ignore file to exclude or include files")
             .action(ArgAction::Append)

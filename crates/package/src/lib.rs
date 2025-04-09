@@ -90,6 +90,7 @@ pub struct FileInfo {
 pub struct PackageID {
     pub name: String,
     pub version: Version,
+    pub arch: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -97,7 +98,6 @@ pub struct DependencyID {
     pub name: String,
     pub version: Option<Version>,
 }
-
 
 /// Information about a package.
 /// - package name and version
@@ -113,6 +113,7 @@ pub struct MetaData {
     //pub id: PackageID,
     pub name: String,
     pub version: Version,
+    pub arch: Option<String>,
     pub mount: Option<String>,
     pub data_hash: Option<String>,
 
@@ -125,8 +126,6 @@ pub struct MetaData {
     pub dependencies: OrderedMap<PkgName, Option<Version>>,
 
     pub files: OrderedMap<FilePath, FileInfo>,
-
-    //note: `#[serde(default)]` mean use default value if it isn't present at deserialize
 
     #[serde(default)]
     #[serde(skip_serializing_if = "OrderedMap::is_empty")]
@@ -266,6 +265,7 @@ impl MetaData {
             //id,
             name: id.name,
             version: id.version,
+            arch: id.arch,
             mount: None,
             data_hash: None,
             data_size: 0,
@@ -296,6 +296,7 @@ impl MetaData {
         PackageID {
             name: self.name.clone(),
             version: self.version.clone(),
+            arch: self.arch.clone(),
         }
     }
 
@@ -306,7 +307,12 @@ impl MetaData {
     }
 
     pub fn from_reader<R: Read>(r: &mut R) -> Result<Self> {
+        #[cfg(feature="sonic_json")]
+        let ret: Self = sonic_rs::from_reader(r)?;
+
+        #[cfg(not(feature="sonic_json"))]
         let ret: Self = serde_json::from_reader(r)?;
+
         Ok(ret)
     }
 
@@ -334,33 +340,99 @@ pub fn seek_to_tar_entry<'a, R>(needle: &str, tar: &'a mut tar::Archive<R>) -> R
             let size = entry.size();
             return Ok((entry, size));
         }
-        //if let Ok(path) = entry.as_ref().unwrap().path() && path == needle {
-            //return Ok(entry?);
-        //}
     }
     Err(anyhow::anyhow!("path {} not found in tar archive", needle))
 }
 
-pub fn package_integrity_check_path(path: &Utf8Path) -> Result<(bool, MetaData)> {
-    let mut file = File::open(path).context("reading file")?;
-    package_integrity_check(&mut file)
+#[derive(Default, Debug)]
+pub struct CheckResult {
+    pub file_hash: String,
+    pub data_hash: String,
+    meta_ok: bool,
+    data_ok: bool,
+    files_ok: bool,
+    name_ok: bool,
 }
 
-/// Check that package file is self consistent. The metadata file list and data hash matches.
-pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaData)> {
+impl CheckResult {
+    pub fn good(&self) -> bool {
+        self.meta_ok
+            && self.data_ok
+            && self.files_ok
+            && self.name_ok
+    }
+}
 
-    let pbar = indicatif::ProgressBar::new(1);
-    pbar.enable_steady_tick(std::time::Duration::from_millis(200));
-    pbar.set_style(indicatif::ProgressStyle::with_template(
-        " {spinner:.green} verifying package"
-    ).unwrap());
+pub fn package_integrity_check_full(
+    mut pkg_file: &mut File,
+    file_name: Option<&str>,
+    known_hash: Option<&str>,
+) -> Result<CheckResult> {
 
-    // it can take a while to parse the file list for large packages, do that in a separate thread
-    // while we move on to hashing the package
-    let metadata = read_metadata(pkg_file).context("error reading package metadata")?;
-    let meta_thread = std::thread::spawn(move || -> Result<MetaData> {
-        MetaData::from_reader(&mut std::io::Cursor::new(&metadata))
-    });
+    pkg_file.rewind()?;
+
+    let filesize = pkg_file.metadata().ok().map(|v| v.len());
+
+    let status = bpmutil::status::global();
+    let bar = status.add_task(Some("verify_package"), file_name, filesize);
+    bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying package {wide_bar:.blue} ").unwrap());
+
+    let mut ret = CheckResult::default();
+
+    // default state must be an integrity failure
+    assert!(!ret.meta_ok);
+    assert!(!ret.data_ok);
+    assert!(!ret.files_ok);
+    assert!(!ret.name_ok);
+
+    let mut read = bpmutil::status::wrap_read(Some(&bar), &mut pkg_file);
+    ret.file_hash = blake3_hash_reader(&mut read)?;
+    bar.finish_and_clear();
+
+    pkg_file.rewind()?;
+
+    if file_name.is_none() && known_hash.is_some() {
+        if known_hash.unwrap() == ret.file_hash {
+            // full file hash matched, assume everything else is good
+            ret.meta_ok = true;
+            ret.data_ok = true;
+            ret.files_ok = true;
+            ret.name_ok = true;
+            return Ok(ret);
+        } else {
+            // hash does not match, failure
+            return Ok(ret);
+        }
+    }
+
+    let metadata_raw = read_metadata(pkg_file).context("error reading package metadata")?;
+    let mut metadata = MetaData::from_reader(&mut std::io::Cursor::new(&metadata_raw))?;
+    ret.meta_ok = true;
+
+    // if not testing, assume ok
+    ret.name_ok = true;
+    if let Some(file_name) = file_name {
+        if let Some((name, version, arch)) = split_parts(file_name) {
+            ret.name_ok = metadata.name == name && metadata.version == version && metadata.arch.as_deref() == arch;
+        } else {
+            ret.name_ok = false;
+            return Ok(ret);
+        }
+    }
+
+    if known_hash.is_some() {
+        if known_hash.unwrap() == ret.file_hash {
+            ret.data_hash = metadata.data_hash.context("metadata has no data hash")?;
+            // assume the rest is good
+            ret.data_ok = true;
+            ret.files_ok = true;
+            return Ok(ret);
+        } else {
+            return Ok(ret);
+        }
+    }
+
+    // --- check data hash ---
 
     pkg_file.rewind()?;
     let computed_sum = {
@@ -368,70 +440,71 @@ pub fn package_integrity_check(mut pkg_file: &mut File) -> Result<(bool, MetaDat
         let mut tar = tar::Archive::new(&mut pkg_file);
         let (mut data, size) = seek_to_tar_entry(DATA_FILE_NAME, &mut tar)?;
 
-        pbar.set_length(size);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            " {spinner:.green} verifying package {wide_bar:.green} {bytes_per_sec}  {bytes}/{total_bytes} "
-        ).unwrap());
+        let bar = status.add_task(Some("verify_data"), file_name, Some(size));
+        bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying data    {wide_bar:.blue} ").unwrap());
 
-        blake3_hash_reader(&mut pbar.wrap_read(&mut data))?
+        let mut read = bar.wrap_read(&mut data);
+        let sum = blake3_hash_reader(&mut read)?;
+        bar.finish_and_clear();
+        sum
     };
 
-    let metadata = meta_thread.join().unwrap()?; // unwrapping an error is only possible on a panic
+    ret.data_ok = metadata.data_hash.as_ref() == Some(&computed_sum);
 
-    let described_sum = metadata.data_hash.as_ref().context("metadata has no data hash").unwrap();
-    let matches = &computed_sum == described_sum;
-    tracing::debug!("computed data hash {} matches:{}", computed_sum, matches);
-
-    //pbar.finish_and_clear();
-
-    if !matches {
-        tracing::error!("package file data hash mismatch {} != {}", computed_sum, described_sum);
-        return Ok((false, metadata));
-    }
-
-    let mut meta_filelist = metadata.files.clone();
+    let mut meta_filelist = std::mem::take(&mut metadata.files);
+    ret.files_ok = true;
 
     // check the file list
     pkg_file.rewind()?;
-    {
 
-        pbar.set_position(0);
-        pbar.set_length(meta_filelist.len() as u64);
-        //let pbar = indicatif::ProgressBar::new(meta_filelist.len() as u64);
-        pbar.set_style(indicatif::ProgressStyle::with_template(
-            " {spinner:.green} verifying files {wide_bar:.green} {pos}/{len} "
-        ).unwrap());
+    let bar = status.add_task(Some("verify_files"), file_name, Some(meta_filelist.len() as u64));
+    bar.set_style(indicatif::ProgressStyle::with_template(" {spinner:.green} verifying files   {wide_bar:.blue} ").unwrap());
 
-        let mut outer_tar = tar::Archive::new(pkg_file);
-        let (data_tar_zst, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
-        let zstd = zstd::Decoder::new(data_tar_zst)?;
-        let mut tar = tar::Archive::new(zstd);
-        for ent in tar.entries()? {
-            let ent = ent?;
-            let path = ent.path()?;
-            let path = path.to_string_lossy().to_string();
-            let path = Utf8Path::new(&path);
-            if meta_filelist.remove(path).is_none() {
-                tracing::error!("a file in the tar was not listed in the metadata {}", path);
-                return Ok((false, metadata));
+    let mut outer_tar = tar::Archive::new(pkg_file);
+    let (data_tar_zst, _size) = seek_to_tar_entry(DATA_FILE_NAME, &mut outer_tar)?;
+    let zstd = zstd::Decoder::new(data_tar_zst)?;
+    let mut tar = tar::Archive::new(zstd);
+    for ent in tar.entries()? {
+        let ent = ent?;
+        let path = ent.path()?;
+        let path = path.to_string_lossy().to_string();
+        let path = Utf8Path::new(&path);
+        if let Some(meta_info) = meta_filelist.remove(path) {
+            match (ent.header().entry_type(), meta_info.filetype) {
+                (tar::EntryType::Directory, FileType::Dir) => {}
+                (tar::EntryType::Regular,   FileType::File) => {}
+                (tar::EntryType::Symlink,   FileType::Link(_)) => {}
+                _ => {
+                    ret.files_ok = false;
+                    tracing::error!("a file in the tar was the incorrect file type {}", path);
+                    break;
+                }
             }
-            // TODO also check that the file type matches
-            pbar.inc(1);
+        } else {
+            tracing::error!("a file in the tar was not listed in the metadata {}", path);
+            ret.files_ok = false;
+            break;
         }
-
-        pbar.finish_and_clear();
-
-        // if there are any remaining files, those were not in the tar
-        if !meta_filelist.is_empty() {
-            let path = meta_filelist.pop_first().unwrap().0;
-            tracing::error!("a file in the metadata was not in the data tar: {}", path);
-            return Ok((false, metadata));
-        }
+        bar.inc(1);
     }
 
-    tracing::trace!("package passes integrity check");
+    // if there are any remaining files, those were not in the tar
+    if !meta_filelist.is_empty() {
+        let path = meta_filelist.pop_first().unwrap().0;
+        tracing::error!("a file in the metadata was not in the data tar: {}", path);
+        ret.files_ok = false;
+    }
 
-    Ok((true, metadata))
+    bar.finish_and_clear();
+
+    return Ok(ret);
+}
+
+/// Check that package file is self consistent. The metadata file list and data hash matches.
+pub fn package_integrity_check(pkg_file: &mut File) -> Result<(bool, MetaData)> {
+    let check = package_integrity_check_full(pkg_file, None, None)?;
+    let md = get_metadata(pkg_file)?;
+    Ok((check.good(), md))
 }
 
 pub fn read_metadata(pkg_file: &mut File) -> Result<Vec<u8>> {
@@ -444,48 +517,57 @@ pub fn read_metadata(pkg_file: &mut File) -> Result<Vec<u8>> {
 }
 
 pub fn get_metadata(pkg_file: &mut File) -> Result<MetaData> {
+    //let now = std::time::Instant::now();
     pkg_file.rewind()?;
     let mut tar = tar::Archive::new(pkg_file);
     let (mut meta, _size) = seek_to_tar_entry(META_FILE_NAME, &mut tar)?;
     let metadata = MetaData::from_reader(&mut meta)?;
+    //println!("get metadata {:?}", now.elapsed());
     Ok(metadata)
 }
 
-pub fn get_filelist(pkg_file: &mut File) -> Result<OrderedMap<FilePath, FileInfo>> {
-    let metadata = get_metadata(pkg_file)?;
-    Ok(metadata.files)
-}
-
-/// "foo_1.2.3" -> ("foo", "1.2.3")
-/// "foo-bar_1.2.3-alpha.bpm" -> ("foo-bar", "1.2.3-alpha")
-pub fn split_parts(filename: &str) -> Option<(&str, &str)> {
+/// "foo_1.2.3" -> ("foo", "1.2.3", None)
+/// "foo_1.2.3_linux64" -> ("foo", "1.2.3", Some("linux64"))
+/// "foo-bar_1.2.3-alpha.bpm" -> ("foo-bar", "1.2.3-alpha", None)
+pub fn split_parts(filename: &str) -> Option<(&str, &str, Option<&str>)> {
 
     let filename = filename.strip_suffix(DOTTED_PKG_FILE_EXTENSION).unwrap_or(filename);
-    let mut parts = filename.split('_');
 
-    let name = parts.next();
-    let version = parts.next();
-    let _reserved = parts.next();
-    let _none = parts.next();
+    let mut it = filename.splitn(3, '_');
+    let name = it.next();
+    let version = it.next();
+    let arch = it.next();
 
-    if let (Some(name), Some(version)) = (name, version) {
-        Some((name, version))
-    } else {
-        None
+    // require a name and version
+    match (name, version, arch) {
+        (Some(name), Some(version), arch) => Some((name, version, arch)),
+        _ => None,
     }
 }
 
-/// Names like "foo-1.0.0.bpm" and "bar-0.2.1.bpm" are packagefile names
+pub fn make_packagefile_name(pkg_name: &str, version: &str, arch: Option<&str>) -> String {
+
+    match arch {
+        Some(arch) if !arch.is_empty() =>
+            format!("{pkg_name}_{version}_{arch}{DOTTED_PKG_FILE_EXTENSION}"),
+        _ =>
+            format!("{pkg_name}_{version}{DOTTED_PKG_FILE_EXTENSION}")
+    }
+}
+
+/// Names like "foo_1.0.0.bpm", "bar_0.2.1.bpm", "baz_1.2.3_linux64.bpm" are packagefile names
 pub fn is_packagefile_name(text: &str) -> bool {
     if text.ends_with(DOTTED_PKG_FILE_EXTENSION) {
-        if let Some((name, version)) = split_parts(text) {
-            return is_valid_package_name(name) && is_valid_version(version)
+        if let Some((name, version, arch)) = split_parts(text) {
+            return is_valid_package_name(name)
+                && is_valid_version(version)
+                && is_valid_arch(arch)
         }
     }
     false
 }
 
-/// Names like "foo" and "bar" are package names
+/// Names like "foo", "foo9", and "foo-bar" are package names
 pub fn is_valid_package_name(text: &str) -> bool {
     // cannot be empty string
     // cannot contain underscore _
@@ -502,10 +584,6 @@ pub fn is_valid_package_name(text: &str) -> bool {
         })
         && !text.ends_with('-')
         && !text.contains("--")
-}
-
-pub fn make_packagefile_name(pkg_name: &str, version: &str) -> String {
-    format!("{pkg_name}_{version}{DOTTED_PKG_FILE_EXTENSION}")
 }
 
 /// strings like "1.2.3" and "0.0.1-alpha+linux" are version strings
@@ -530,11 +608,86 @@ pub fn is_valid_version(text: &str) -> bool {
         })
 }
 
-pub fn filename_match(filename: &str, id: &PackageID) -> bool {
-    if let Some((name, version)) = split_parts(filename) {
-        return name == id.name && version == id.version;
+/// strings like "", "noarch", "linux_x86_64", "linux-aarch64" are valid arch strings
+pub fn is_valid_arch(text: Option<&str>) -> bool {
+
+    // must be [a-zA-Z][a-zA-Z0-9_\-]*
+    // must start with alphabetic
+    // must end with alphanumeric
+    // can contain singluar - or _
+    match text {
+        None | Some("") => true,
+        Some(text) =>
+            text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                && !text.contains("--")
+                && !text.contains("__")
+                && !text.contains("_-")
+                && !text.contains("-_")
+                && !text.starts_with('-')
+                && !text.starts_with('_')
+                && !text.ends_with('-')
+                && !text.ends_with('_'),
     }
-    false
+}
+
+pub fn filename_match(filename: &str, id: &PackageID) -> bool {
+    let mut ret = false;
+    if let Some((name, version, arch)) = split_parts(filename) {
+        ret = name == id.name
+            && version == id.version
+            && ArchMatcher::from(arch).matches(&id.arch);
+    }
+    //tracing::trace!("filename_match {} {:?} => {}", filename, id, ret);
+    ret
+}
+
+#[derive(Debug)]
+pub enum ArchMatcher {
+    Any,
+    None,
+    Some(String),
+}
+
+impl From<&str> for ArchMatcher {
+    fn from(value: &str) -> Self {
+        match value {
+            "*" => ArchMatcher::Any,
+            "" | "noarch" => ArchMatcher::None,
+            x => ArchMatcher::Some(x.into()),
+        }
+    }
+}
+
+impl From<&String> for ArchMatcher {
+    fn from(value: &String) -> Self {
+        ArchMatcher::from(value.as_str())
+    }
+}
+
+impl From<&Option<String>> for ArchMatcher {
+    fn from(value: &Option<String>) -> Self {
+        ArchMatcher::from(value.as_deref())
+    }
+}
+
+impl From<Option<&str>> for ArchMatcher {
+    fn from(value: Option<&str>) -> Self {
+        match value {
+            None => ArchMatcher::None,
+            Some(value) => ArchMatcher::from(value),
+        }
+    }
+}
+
+impl ArchMatcher {
+    pub fn matches<T: Into<ArchMatcher>>(&self, other: T) -> bool {
+        match (self, &other.into()) {
+            (Self::Any, _) => true,
+            (Self::None, Self::None) => true,
+            (Self::Some(x), Self::Some(y)) if x == y => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -542,10 +695,47 @@ mod test {
     use super::*;
 
     #[test]
+    fn valid_arch() {
+        assert!(is_valid_arch(None));
+        assert!(is_valid_arch(Some("")));
+        assert!(is_valid_arch(Some("noarch")));
+        assert!(is_valid_arch(Some("linux")));
+        assert!(is_valid_arch(Some("linux-x86")));
+        assert!(is_valid_arch(Some("linux-x86_64")));
+        assert!(is_valid_arch(Some("linux_x86-64")));
+
+        assert!(!is_valid_arch(Some("linux--64")));
+        assert!(!is_valid_arch(Some("linux__64")));
+        assert!(!is_valid_arch(Some("linux-_64")));
+        assert!(!is_valid_arch(Some("linux_-64")));
+        assert!(!is_valid_arch(Some("-linux")));
+        assert!(!is_valid_arch(Some("_linux")));
+        assert!(!is_valid_arch(Some("linux-")));
+        assert!(!is_valid_arch(Some("linux_")));
+    }
+
+    #[test]
+    fn arch_match() {
+        assert!(ArchMatcher::from("").matches(""));
+        assert!(ArchMatcher::from("").matches(None));
+        assert!(ArchMatcher::from(None).matches(""));
+        assert!(ArchMatcher::from("*").matches(""));
+        assert!(ArchMatcher::from("*").matches("foo"));
+        assert!(ArchMatcher::from("*").matches(None));
+        assert!(ArchMatcher::from("foo").matches("foo"));
+
+        assert!(!ArchMatcher::from(None).matches("bar"));
+        assert!(!ArchMatcher::from("").matches("bar"));
+        assert!(!ArchMatcher::from("foo").matches("bar"));
+    }
+
+    #[test]
     fn package_names() {
 
-        assert_eq!(split_parts("foo_1.2.3.bpm"), Some(("foo", "1.2.3")));
-        assert_eq!(split_parts("foo-bar_1.2.3-alpha.1.bpm"), Some(("foo-bar", "1.2.3-alpha.1")));
+        assert_eq!(split_parts("foo_1.2.3.bpm"), Some(("foo", "1.2.3", None)));
+        assert_eq!(split_parts("foo-bar_1.2.3-alpha.1.bpm"), Some(("foo-bar", "1.2.3-alpha.1", None)));
+
+        assert_eq!(split_parts("foo_1.2.3_linux-x86_64.bpm"), Some(("foo", "1.2.3", Some("linux-x86_64"))));
 
         assert_eq!(split_parts("foo-1.2.3.bpm"), None);
 
@@ -556,9 +746,11 @@ mod test {
         assert!(is_packagefile_name("foo-bar_1.2.3+linux.bpm"));
         assert!(is_packagefile_name("foo-bar_1.2.3-alpha+linux.bpm"));
 
-        assert_eq!(make_packagefile_name("foo", "1.2.3"), "foo_1.2.3.bpm");
-        assert!(is_packagefile_name(&make_packagefile_name("foo", "1.2.3")));
-        assert_eq!(split_parts(&make_packagefile_name("foo", "1.2.3")), Some(("foo", "1.2.3")));
+        assert_eq!(make_packagefile_name("foo", "1.2.3", None), "foo_1.2.3.bpm");
+        assert_eq!(make_packagefile_name("foo", "1.2.3", Some("")), "foo_1.2.3.bpm");
+
+        assert!(is_packagefile_name(&make_packagefile_name("foo", "1.2.3", None)));
+        assert_eq!(split_parts(&make_packagefile_name("foo", "1.2.3", None)), Some(("foo", "1.2.3", None)));
     }
 
     fn get_instance() -> MetaData {
@@ -566,6 +758,7 @@ mod test {
             //id: PackageID {
                 name: "foo".into(),
                 version: "1.2.3".into(),
+                arch: None,
             //},
             mount: Some("EXT".into()),
             data_hash: None,
@@ -593,6 +786,7 @@ mod test {
                 hash: None,
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
         meta.add_file(
@@ -602,6 +796,7 @@ mod test {
                 hash: Some("2ffac14".into()),
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
         meta.add_file(
@@ -611,6 +806,7 @@ mod test {
                 hash: Some("1aef313".into()),
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
         meta.add_file(
@@ -620,6 +816,7 @@ mod test {
                 hash: Some("77af123".into()),
                 mtime: None,
                 volatile: false,
+                size: None,
             },
         );
 
@@ -691,6 +888,7 @@ mod test {
             hash: None,
             mtime: Some(100),
             volatile: false,
+            size: None,
         };
 
         let s = FileInfoString("f::100".into());
@@ -707,6 +905,7 @@ mod test {
             hash: Some("a1b2".into()),
             mtime: Some(100),
             volatile: true,
+            size: None,
         };
 
         let s = FileInfoString("fv:a1b2:100".into());
@@ -724,6 +923,7 @@ mod test {
             hash: None,
             mtime: None,
             volatile: false,
+            size: None,
         };
 
         let s = FileInfoString("d".into());
@@ -741,6 +941,7 @@ mod test {
             hash: None,
             mtime: None,
             volatile: false,
+            size: None,
         };
 
         let s = FileInfoString("s:foo/bar".into());
@@ -758,6 +959,7 @@ mod test {
             hash: None,
             mtime: None,
             volatile: true,
+            size: None,
         };
 
         let s = FileInfoString("sv:foo/bar".into());

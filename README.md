@@ -128,13 +128,53 @@ bpm_config.toml:
     [mount]
     MAIN = "${BPM}/install/bin/${OS}/${ARCHX8664}"
 
+direct replacements:
+
 | key | value |
 |-----|-------|
 | `BPM` | directory of the bpm executable |
 | `THIS` | directory of the config file |
 | `OS`  | `linux`, `unix`, `windows`, `darwin`, `wasm`, `unknown` |
-| `ARCHX8664` | `x86`, `x86_64`, `arm`, or `aarch64` |
 | `ARCH3264` or `POINTER_WIDTH` | `32` or `64` |
+| `ARCHX8664` | `x86`, `x86_64`, `arm`, or `aarch64` |
+
+basic true/false replacements that optionally take true and false strings:
+
+  ${VAR:true_value:false_value}
+
+For example `${windows:foo:bar}` will result in "foo" on windows and "bar" on anything non-windows.
+
+| key | value |
+|-----|-------|
+| `${linux}` | "linux" |
+| `${windows}` | "windows" |
+| `${macos}` | "macos" |
+| `${unix}` | "unix" |
+| `${bsd}` | "bsd" |
+| `${freebsd}` | "freebsd" |
+| `${openbsd}` | "openbsd" |
+| `${netbsd}` | "netbsd" |
+| `${wasm}` | "wasm" |
+| `${32}` | "32" |
+| `${64}` | "64" |
+| `${x86}` | "x86" |
+| `${x86_64}` | "x86_64" |
+| `${x86-64}` | "x86-64" |
+| `${amd64}` | "amd64" |
+| `${x64}` | "x64" |
+| `${aarch64}` | "aarch64" |
+| `${arm}` | "arm" |
+| `${gnu}` | "gnu" |
+| `${msvc}` | "msvc" |
+| `${musl}` | "musl" |
+
+environment variable replacements:
+
+`${ENV(VAR)}` the value of the env var is the replacement string, <br>
+OR <br>
+`${ENV(VAR):true_value:false_value}` <br>
+
+An env var is only considered false if it is not defined OR has the value "0".
 
 Note: `BPM` and `THIS` are only valid as prefixes to a path. Example: `"${BPM}/path/parts/`, `${THIS}/../path/parts`, or for a provider `file://{$BPM}/pkg/path"`.
 

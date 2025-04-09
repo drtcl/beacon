@@ -28,16 +28,15 @@ strip = true
 
 [profile.tiny]
 inherits = "release"
-debug = false
-strip = true
 opt-level = 'z'
 codegen-units = 1
 lto = true
-panic = "abort"
+#panic = "abort"
 
 [workspace.lints.clippy]
 needless_return = "allow"
 let_and_return = "allow"
+too_many_arguments = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.82"
@@ -51,11 +50,13 @@ humantime = "2.1.0"
 ignore    = "0.4.22"
 indicatif = "0.17.8"
 itertools = "0.12.1"
-regex = "1.10.4"
+rand = "0.8.5"
+regex = "1.11.1"
 semver = "1.0.22"
 serde = { version = "1.0.199", features = ["derive"] }
 serde_derive = "1.0.199"
 serde_json = "1.0.116"
+static_assertions = "1.1.0"
 tabwriter = "1.4.0"
 tar = "0.4.40"
 tempfile  = "3.10.1"

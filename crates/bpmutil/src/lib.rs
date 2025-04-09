@@ -1,5 +1,12 @@
-use std::io::{Write, Read};
+use anyhow::Result;
 use camino::Utf8Path;
+use std::fs::File;
+use std::io::{Write, Read};
+use std::time::Duration;
+
+use anyhow::Context;
+
+pub mod status;
 
 /// Read all bytes from a [Read] and return a blake3 hash
 pub fn blake3_hash_reader<R: Read>(mut read: R) -> std::io::Result<String> {
@@ -63,60 +70,118 @@ pub fn get_filestate(path: &Utf8Path) -> FileState {
     state
 }
 
-//pub struct CustomProgress {
-//    pub bar: indicatif::ProgressBar,
-//    auto_clear: bool,
-//}
-//
-//impl Drop for CustomProgress {
-//    fn drop(&mut self) {
-//        if self.auto_clear {
-//            self.bar.finish_and_clear();
-//        }
-//    }
-//}
-//
-//impl CustomProgress {
-//    pub fn new_bar(bar: indicatif::ProgressBar) -> Self {
-//        Self { bar, auto_clear: false }
-//    }
-//    pub fn new(len: u64) -> Self {
-//        Self { bar: indicatif::ProgressBar::new(len), auto_clear: false }
-//    }
-//    pub fn new_style(len: u64, style: &str) -> Self {
-//        let bar = indicatif::ProgressBar::new(len);
-//        bar.set_style(indicatif::ProgressStyle::with_template(style).expect("bad progress style"));
-//        Self { bar, auto_clear: false }
-//    }
-//    pub fn hide(&self) {
-//        self.bar.set_draw_target(indicatif::ProgressDrawTarget::hidden());
-//    }
-//    pub fn show(&self) {
-//        self.bar.set_draw_target(indicatif::ProgressDrawTarget::stderr());
-//    }
-//    pub fn auto_clear(&mut self, yes: bool) {
-//        self.auto_clear = yes;
-//    }
-//}
-
 pub struct SlowWriter<T: Write> {
     inner: T,
     duration: std::time::Duration,
+    //count: usize,
 }
 impl<T:Write> SlowWriter<T> {
     pub fn new(t: T, duration: std::time::Duration) -> Self {
         Self {
             inner: t,
             duration,
+            //count: 4 * 1024 * 1024,
         }
     }
 }
 impl<T:Write> Write for SlowWriter<T> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        //if data.len() > self.count {
+            //return Err(std::io::Error::new(std::io::ErrorKind::Other, "bail"));
+        //}
+        //self.count -= data.len();
         std::thread::sleep(self.duration);
         self.inner.write(data)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// open a file for use as a lockfile
+/// write permission is required
+/// will create parent directory if needed
+pub fn open_lockfile(path: &Utf8Path) -> Result<File> {
+
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            if std::fs::create_dir_all(parent).is_ok() {
+                tracing::debug!("created lockfile parent dir {}", parent);
+            } else {
+                tracing::warn!("could not create missing lockfile parent dir {}", parent);
+            }
+        }
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .context("opening lockfile")?;
+    Ok(file)
+}
+
+/// parse a string like "1h30m20s" into a duration
+pub fn parse_duration(s: &str) -> Result<Duration> {
+
+    if let Ok(s) = s.parse::<u64>() {
+        Ok(Duration::from_secs(s))
+    } else if let Ok(d) = humantime::parse_duration(s) {
+        Ok(d)
+    } else {
+        anyhow::bail!("invalid time string");
+    }
+}
+
+pub fn parse_duration_base(s: Option<&str>, base: Duration) -> Result<Duration> {
+    if let Some(s) = s {
+        if let Ok(n) = s.parse::<u32>() {
+            let d = base * n;
+            Ok(d)
+        } else {
+            Ok(parse_duration(s)?)
+        }
+    } else {
+        Ok(Duration::ZERO)
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::*;
+
+    #[test]
+    fn durations() {
+
+        // no base
+        assert_eq!(Duration::from_secs(90), parse_duration("1m30s").unwrap());
+        assert_eq!(Duration::from_secs(90), parse_duration("90s").unwrap());
+        assert_eq!(Duration::from_secs(300), parse_duration("300s").unwrap());
+        assert_eq!(Duration::from_secs(300), parse_duration("5m").unwrap());
+        assert_eq!(Duration::from_secs(300), parse_duration("5min").unwrap());
+        assert_eq!(Duration::from_secs(60 * 60 + 30 * 60), parse_duration("1h30m").unwrap());
+        assert_eq!(Duration::from_secs(60 * 60 + 30 * 60), parse_duration("90m").unwrap());
+        assert_eq!(Duration::from_millis(20), parse_duration("20ms").unwrap());
+
+        // 1 second base
+        assert_eq!(Duration::from_secs(90), parse_duration_base(Some("90"), Duration::from_secs(1)).unwrap());
+        assert_eq!(Duration::from_secs(90), parse_duration_base(Some("1m30s"), Duration::from_secs(1)).unwrap());
+
+        // None = zero time
+        assert_eq!(Duration::ZERO, parse_duration_base(None, Duration::from_secs(1)).unwrap());
+        assert_eq!(Duration::ZERO, Duration::from_secs(0));
+        assert_eq!(Duration::ZERO, Duration::from_micros(0));
+
+        // 1 minute/hour base
+        assert_eq!(Duration::from_secs(60), parse_duration_base(Some("1"), Duration::from_secs(60)).unwrap());
+        assert_eq!(Duration::from_secs(60 * 60), parse_duration_base(Some("1"), Duration::from_secs(60 * 60)).unwrap());
+
+        // weird bases
+        assert_eq!(Duration::from_secs(90), parse_duration_base(Some("1"), Duration::from_secs(90)).unwrap());
+        assert_eq!(Duration::from_secs(120), parse_duration_base(Some("2"), Duration::from_secs(60)).unwrap());
+        assert_eq!(Duration::from_secs(24), parse_duration_base(Some("2"), Duration::from_secs(12)).unwrap());
     }
 }

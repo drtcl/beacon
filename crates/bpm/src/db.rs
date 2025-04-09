@@ -42,6 +42,10 @@ pub struct CacheFile {
 
     pub filename: String,
 
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+
     // time last used
     pub touched: chrono::DateTime<chrono::offset::Utc>,
 
@@ -137,6 +141,24 @@ impl Db {
     //    Db::from_reader(file)
     //}
 
+    pub fn cache_insert(&mut self, filename: &str, hash: Option<String>, duration: Option<std::time::Duration>) {
+        self.cache_evict(filename);
+        self.cache_files.push(CacheFile {
+            filename: filename.into(),
+            touched: chrono::Utc::now().round_subsecs(0),
+            in_use: false,
+            retention: duration,
+            hash,
+        });
+    }
+
+    pub fn cache_get_hash(&self, filename: &str) -> Option<String> {
+        if let Some(ent) = self.cache_files.iter().find(|ent| ent.filename == filename) {
+            return ent.hash.clone();
+        }
+        None
+    }
+
     pub fn cache_touch(&mut self, filename: &str, duration: Option<std::time::Duration>) {
         match self.cache_files.iter_mut().find(|e| e.filename == filename) {
             Some(ent) => {
@@ -149,6 +171,7 @@ impl Db {
                     filename: filename.to_string(),
                     in_use: false,
                     retention: duration,
+                    hash: None,
                 });
             }
         }
@@ -160,7 +183,7 @@ impl Db {
 
     pub fn cache_unuse_all_versions(&mut self, pkg_name: &str) {
         for file in self.cache_files.iter_mut() {
-            if let Some((name, _version)) = package::split_parts(&file.filename) {
+            if let Some((name, _version, _arch)) = package::split_parts(&file.filename) {
                 if name == pkg_name {
                     file.in_use = false;
                 }
@@ -179,6 +202,7 @@ impl Db {
                     filename: filename.to_string(),
                     in_use,
                     retention: None,
+                    hash: None,
                 });
             }
         }

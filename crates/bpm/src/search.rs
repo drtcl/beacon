@@ -1,15 +1,11 @@
-use std::collections::BTreeMap;
-
-use anyhow::Result;
-
 use std::rc::Rc;
-use serde::{Serialize, Deserialize};
+use version::Version;
 
-pub type PackageName = String;
-use version::{Version, VersionString};
+//pub type PackageName = String;
 pub type Url = String;
 pub type Filename = String;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SingleListing {
     pub pkg_name: Rc<str>,
@@ -17,4 +13,5 @@ pub struct SingleListing {
     pub filename: Filename,
     pub url: Url,
     pub channels: Vec<String>,
+    pub arch: Option<String>,
 }

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use httpsearch::*;
+use clap::arg;
 
 fn main() -> Result<()> {
 
@@ -11,31 +12,32 @@ fn main() -> Result<()> {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let mut args = std::env::args().skip(1);
-    let url = args.next().expect("expected url");
-    let pkg_name = args.next();
-    let pkg_name = pkg_name.as_deref();
+    let matches = clap::Command::new("httpsearch")
+        .arg(arg!(<url> "base url"))
+        .arg(arg!(-p --pkg <pkg> "Search for a single package"))
+        .arg(arg!(-a --arch <arch> "Search for a single architecture"))
+        .get_matches();
 
-    let mut url = String::from(&url);
+    let url = matches.get_one::<String>("url").unwrap();
+    let pkg = matches.get_one::<String>("pkg").map(|s| s.as_str());
+    let arch = matches.get_one::<String>("arch").map(|s| s.as_str());
+
+    let mut url = String::from(url);
     if !url.starts_with("http") {
         url.insert_str(0, "http://");
     }
 
-    let packages = full_scan(None, &url, pkg_name)?;
-    for (name, pkg_info) in &packages.packages {
-        //println!("{} {:?}", name, pkg_info.keys());
-        println!("{}", name);
-        if let Some(kv) = &pkg_info.kv {
-            println!("  kv {}", serde_json::to_string_pretty(kv)?);
-        }
-        for (version, info) in &pkg_info.versions {
-            print!("  {}", version);
-            for chan in &info.channels {
-                print!(" {}", chan);
+    let arch = arch.as_ref().map(std::slice::from_ref);
+    if let Some(a) = arch {
+        for a in a {
+            if *a != "*" && !package::is_valid_arch(Some(a)) {
+                println!("warning: {} is not a valid arch string", a);
             }
-            println!();
         }
     }
+
+    let packages = full_scan(None, &url, pkg, arch)?;
+    packages.print();
 
     Ok(())
 }
@@ -48,7 +50,7 @@ mod test {
     #[test]
     fn https() {
         let client = reqwest::blocking::Client::new();
-        let resp = client.get("https://google.com").send().unwrap();
+        let resp = client.get("https://github.com").send().unwrap();
         dbg!(&resp);
         let body = resp.bytes().unwrap();
         dbg!(&body);

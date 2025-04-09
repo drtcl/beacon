@@ -1,26 +1,27 @@
-#![feature(let_chains)]
+#![feature(file_lock)]
 #![feature(iter_collect_into)]
-#![feature(io_error_more)]
+#![feature(let_chains)]
+#![feature(thread_id_value)]
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
+// ideas for future features
+// - capability probing
+// - multiple paths for a provider OR provider groups. (probably groups)
+// - fastpath, pre-scan, pre-scan age limit, version it
 
+mod app;
+mod args;
 mod config;
-mod macros;
 mod db;
 mod fetch;
+mod macros;
 mod provider;
 mod search;
 mod source;
-mod app;
-mod args;
 
 use anyhow::Context;
 use anyhow::Result as AResult;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
-use std::io::Seek;
 use std::io::Write;
 use std::iter::Iterator;
 use std::path::{Path, PathBuf};
@@ -47,14 +48,6 @@ fn create_dir<P: AsRef<Path>>(path: P) -> AResult<()> {
         },
     }
 }
-
-//fn path_rewrite(mut path: String) -> String {
-//    let needles = ["<ROOT>", "<PWD>"];
-//    for needle in needles {
-//        path = path.replace(needle, "XX");
-//    }
-//    path
-//}
 
 /// search for the config file
 /// 1. bpm_config.toml next to the executable
@@ -102,15 +95,29 @@ fn find_config_file() -> AResult<Utf8PathBuf> {
 
 fn main() -> AResult<()> {
 
+    // nice for debugging
+    //let arg_log_path = std::env::current_exe().unwrap().with_file_name("bpm.log");
+    //let mut arg_log = std::fs::OpenOptions::new().create(true).append(true).open(&arg_log_path).expect("open log");
+    //let _ = arg_log.lock().expect("log file lock");
+    //use chrono::SubsecRound;
+    //let _ = write!(&mut arg_log, "{}", format!("{} {} {:?}\n",
+    //    chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
+    //    std::process::id(),
+    //    std::env::args().collect::<Vec<_>>()
+    //));
+
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .without_time()
         .with_max_level(tracing::Level::TRACE)
         .with_env_filter(tracing_subscriber::EnvFilter::from_env("BPM_LOG"))
+        //.with_writer(arg_log)
+        .with_writer(std::io::stderr)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let matches = args::get_cli().get_matches_from(wild::args());
+
 
     // shortcut to bpm-pack, no config file needed
     #[cfg(feature = "pack")]
@@ -131,12 +138,10 @@ fn main() -> AResult<()> {
 
     // load the config file
     config::store_config_path(config_file.canonicalize_utf8().context("failed to canonicalize config path")?);
-    let mut app = App {
-        config: config::Config::from_path(config_file).context("reading config file")?,
-        db: db::Db::new(),
-        db_loaded: false,
-        provider_filter: provider::ProviderFilter::empty(),
-    };
+    let config = config::Config::from_path(config_file).context("reading config file")?;
+
+    // create main App struct
+    let mut app = App::new(config);
 
     match matches.subcommand() {
         Some(("cache", sub_matches)) => {
@@ -154,14 +159,19 @@ fn main() -> AResult<()> {
                     let in_use = matches.get_flag("in-use");
                     app.cache_evict(pkg, version, in_use)?;
                 },
-                Some(("list", matches)) => {
-                    //let pkg = matches.get_one::<String>("pkg").unwrap();
+                Some(("list", _matches)) => {
                     app.cache_list()?;
                 },
                 Some(("fetch", matches)) => {
-                    let pkg = matches.get_one::<String>("pkg").unwrap();
+
+                    let pkgs = matches.get_many::<String>("pkg")
+                        .map_or(Vec::new(), |given| given.collect());
+
+                    let arch = args::pull_many_opt(matches, "arch");
+                    app.setup_arch_filter(arch);
+
                     app.provider_filter = args::parse_providers(matches);
-                    app.cache_fetch(pkg)?;
+                    app.cache_fetch(&pkgs)?;
                 },
                 Some(("touch", matches)) => {
 
@@ -174,7 +184,7 @@ fn main() -> AResult<()> {
                     app.cache_touch(pkg, version, duration)?;
                 },
                 _ => {
-                    todo!("NYI");
+                    unreachable!();
                 }
             }
         }
@@ -183,18 +193,14 @@ fn main() -> AResult<()> {
         }
         Some(("scan", sub_matches)) => {
 
-            let debounce = sub_matches.get_one::<String>("debounce");
-            let debounce : std::time::Duration = if let Some(s) = debounce {
-                if let Ok(s) = s.parse::<u64>() {
-                    std::time::Duration::from_secs(s)
-                } else if let Ok(d) = humantime::parse_duration(s) {
-                    d
-                } else {
-                    anyhow::bail!("invalid debounce time");
-                }
+            let debounce = if let Some(d) = sub_matches.get_one::<String>("debounce") {
+                Some(bpmutil::parse_duration_base(Some(d), std::time::Duration::from_secs(1))?)
             } else {
-                std::time::Duration::from_secs(0)
+                None
             };
+
+            let arch = args::pull_many_opt(sub_matches, "arch");
+            app.setup_arch_filter(arch);
 
             app.provider_filter = args::parse_providers(sub_matches);
 
@@ -206,9 +212,13 @@ fn main() -> AResult<()> {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
             let update = sub_matches.get_flag("update");
             let reinstall = sub_matches.get_flag("reinstall");
+            let target = sub_matches.get_one::<String>("target");
+
+            let arch = args::pull_many_opt(sub_matches, "arch");
+            app.setup_arch_filter(arch);
 
             app.provider_filter = args::parse_providers(sub_matches);
-            app.install_cmd(pkg_name, no_pin, update, reinstall)?;
+            app.install_cmd(pkg_name, no_pin, update, reinstall, target)?;
         }
         Some(("uninstall", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
@@ -223,6 +233,8 @@ fn main() -> AResult<()> {
                 .map_or(Vec::new(), |given| given.collect());
 
             app.provider_filter = args::parse_providers(sub_matches);
+
+            app.setup_arch_filter(None);
 
             app.update_packages_cmd(&pkg_names)?;
         }
@@ -241,21 +253,25 @@ fn main() -> AResult<()> {
             // --stop-on-first  option to stop on the first mismatch
             // --fail-fast?
 
-            let verbose = sub_matches.get_flag("verbose");
-            let restore = sub_matches.get_flag("restore");
+            let verbose          = sub_matches.get_count("verbose").clamp(0, 2);
+            let restore          = sub_matches.get_flag("restore");
             let restore_volatile = sub_matches.get_flag("restore-volatile");
-            let mtime   = sub_matches.get_flag("mtime");
+            let fail_fast        = sub_matches.get_flag("fail-fast");
+            let mtime            = sub_matches.get_flag("mtime");
 
             let pkg_names = sub_matches
                 .get_many::<String>("pkg")
                 .map_or(Vec::new(), |given| given.collect());
 
-            app.verify_cmd(&pkg_names, restore, restore_volatile, verbose, mtime)?;
+            app.verify_cmd(&pkg_names, restore, restore_volatile, fail_fast, verbose, mtime)?;
         }
         Some(("search", sub_matches)) => {
             let pkg_name = sub_matches.get_one::<String>("pkg").unwrap();
             let exact = sub_matches.get_flag("exact");
-            //println!("searching for package {}", pkg_name);
+
+            let arch = args::pull_many_opt(sub_matches, "arch");
+            app.setup_arch_filter(arch);
+
             app.search_cmd(pkg_name, exact)?;
         }
         Some(("query", sub_matches)) => {
@@ -281,6 +297,9 @@ fn main() -> AResult<()> {
                         .map(|v| v.collect::<Vec<&String>>())
                         .map(|v| v.iter().map(|s| s.as_str()).collect());
 
+                    let arch = args::pull_many_opt(sub_matches, "arch");
+                    app.setup_arch_filter(arch);
+
                     let provider = sub_matches.get_one::<String>("from-providers"); //.map(|s| s.as_str());
                     if let Some(provider) = provider {
                         if provider == "*" {
@@ -305,18 +324,3 @@ fn main() -> AResult<()> {
 
     Ok(())
 }
-
-//    //---
-//    let r = humantime::parse_duration("2d30s1ms");
-//    dbg!(&r);
-//    let d = r?;
-//    let d = std::time::Duration::from_secs(d.as_secs());
-//    let d = humantime::format_duration(d);
-//    println!("{}", d.to_string());
-//
-//    let now = chrono::Utc::now();
-//    let then = now + chrono::Duration::seconds(120) + chrono::Duration::milliseconds(123);
-//    let dur = then - now;
-//    let d = humantime::format_duration(dur.to_std()?);
-//    println!("{}", d.to_string());
-//    //---
