@@ -110,18 +110,44 @@ async fn scan_package_dir(
         }
     }
 
+    let kv = Arc::new(Mutex::new(None));
+    let channels = Arc::new(Mutex::new(None));
+
     // parse the kv.json file and save the result
     if let Some(kv_url) = kv_json.first() {
         if let Ok(url) = Url::parse(&kv_url.url) {
             let semaphore = Arc::clone(&semaphore);
             let client = Arc::clone(&client);
-            let report = Arc::clone(&report);
-            let pkg_name = pkg_name.clone();
+            let kv = Arc::clone(&kv);
             joinset.spawn(async move {
                 if let Ok(body) = fetch_page(&semaphore, &client, &url).await {
-                    if let Ok(kv) = serde_json::from_str(&body) {
-                        let mut report = report.lock().unwrap();
-                        report.add_kv(&pkg_name, kv);
+                    match serde_json::from_str(&body) {
+                        Ok(val) => {
+                            *kv.lock().unwrap() = Some(val);
+                        }
+                        Err(_) => {
+                            tracing::debug!("kv file is invalid json");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    // parse the channels.json file saving it for later
+    if let Some(channels_json) = channels_json.first() {
+        if let Ok(url) = Url::parse(&channels_json.url) {
+            let channels = Arc::clone(&channels);
+            joinset.spawn(async move {
+                if let Ok(body) = fetch_page(&semaphore, &client, &url).await {
+                    match serde_json::from_str::<ChannelList>(&body) {
+                        Ok(val) => {
+                            //println!("channels json: {:?}", val);
+                            *channels.lock().unwrap() = Some(val);
+                        },
+                        Err(_) => {
+                            tracing::debug!("channels file is invalid json");
+                        }
                     }
                 }
             });
@@ -131,29 +157,26 @@ async fn scan_package_dir(
     // wait for everything to complete
     joinset.join_all().await;
 
-    // now that everything else is complete, we can add channels from the channels.json file.
-    // parse the channels.json file and apply any channels to versions as it specifies
-    if let Some(channels_json) = channels_json.first() {
-        if let Ok(url) = Url::parse(&channels_json.url) {
-            if let Ok(body) = fetch_page(&semaphore, &client, &url).await {
-                match serde_json::from_str::<ChannelList>(&body) {
-                    Ok(channels) => {
-                        //println!("channels json: {:?}", channels);
-                        let mut report = report.lock().unwrap();
-                        for (chan_name, versions) in channels {
-                            for v in versions {
-                                report.insert_channel(&pkg_name, &v, &chan_name);
-                            }
-                        }
-                    },
-                    Err(_) => {
-                        tracing::debug!("invalid json at {}", url.as_str());
-                    }
-                }
+    // apply explicit channels to versions as listed in the channels.json file.
+    // We wait to do this until all versions have been added.
+    if let Some(channels) = &mut *channels.lock().unwrap() {
+        let channels = std::mem::take(channels);
+        let mut report = report.lock().unwrap();
+        for (chan_name, versions) in channels {
+            for v in versions {
+                report.insert_channel(&pkg_name, &v, &chan_name);
             }
         }
     }
 
+    // store the kv in the package results. We wait to do this until after all verions are handled
+    // because we only save the kv if the pacakge exists, and it will only exist if at least one
+    // version exists.
+    if let Some(kv) = &mut *kv.lock().unwrap() {
+        let kv = std::mem::take(kv);
+        let mut report = report.lock().unwrap();
+        report.add_kv(&pkg_name, kv);
+    };
 
 }
 

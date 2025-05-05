@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     if let Some(a) = arch {
         for a in a {
             if *a != "*" && !package::is_valid_arch(Some(a)) {
-                println!("warning: {} is not a valid arch string", a);
+                println!("warning: {a} is not a valid arch string");
             }
         }
     }
