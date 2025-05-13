@@ -922,6 +922,7 @@ impl App {
             " {spinner:.green} diffing  {wide_bar:.blue} {pos}/{len} "
         ).unwrap());
 
+        // files that have the same content and mtime
         let skip_files = std::sync::Mutex::new(HashSet::<Utf8PathBuf>::new());
 
         // spawn threads for hashing/diffing existing files
@@ -964,21 +965,43 @@ impl App {
                             }
 
                             if do_hash {
-                                // if the file has a different mtime, just replace it
-                                if let Some(mtime) = info.mtime {
-                                    if let Some(cur_mtime) = file_state.mtime && cur_mtime != mtime {
-                                        do_hash = false;
-                                    }
-                                }
-                            }
-
-                            if do_hash {
                                 if let Some(new_hash) = info.hash.as_ref() {
                                     if let Ok(mut file) = File::open(&fullpath) {
                                         if let Ok(hash) = blake3_hash_reader(&mut file) {
                                             if &hash == new_hash {
-                                                // this file can be skipped during update
-                                                t_skip_files.insert(path.clone());
+
+                                                // hashes match, file content is the same
+
+                                                let mut skip = true;
+
+                                                // check if the file needs its mtime adjusted
+                                                if let Some(mtime) = info.mtime {
+                                                    if let Some(cur_mtime) = file_state.mtime && cur_mtime != mtime {
+                                                        // the file have a different mtime
+                                                        //diff_bar.bar().suspend(|| {
+                                                        //    println!("{} has different mtime", path);
+                                                        //    println!("   old {}", cur_mtime);
+                                                        //    println!("   new {}", mtime);
+                                                        //});
+
+                                                        // the file contents are the same, but they have different mtime.
+                                                        // attempt to update the mtime here, if we get an error doing so, just unpack the file again
+                                                        if let Some(mtime) = info.mtime {
+                                                            let ftime = filetime::FileTime::from_unix_time(mtime as i64, 0);
+                                                            if filetime::set_file_mtime(&fullpath, ftime).is_ok() {
+                                                                //println!("{} mtime adjusted", path);
+                                                            } else {
+                                                                //println!("{} mtime set FAIL", path);
+                                                                skip = false;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if skip {
+                                                    // this file can be skipped during update
+                                                    t_skip_files.insert(path.clone());
+                                                }
                                             }
                                         }
                                     }
@@ -1348,16 +1371,22 @@ impl App {
                             let db_mtime = fileinfo.mtime;
                             if db_mtime.is_some() {
                                 let fs_mtime = state.mtime;
-                                //println!("db_mtime {:?}", db_mtime);
-                                //println!("fs_mtime {:?}", fs_mtime);
+                                //verify_bar.bar().suspend(|| {
+                                //    println!("{path}");
+                                //    println!("  db_mtime {:?}", db_mtime);
+                                //    println!("  fs_mtime {:?}", fs_mtime);
+                                //});
                                 if fs_mtime.is_some() && db_mtime == fs_mtime {
-                                    //vout!(verbose, "  mtime same");
+                                    //verify_bar.bar().suspend(|| {
+                                    //    vout!(verbose > 0, "  mtime same");
+                                    //});
                                     check_hash = false;
                                 }
                             }
                         }
 
                         if check_hash {
+
                             let db_hash = fileinfo.hash.as_ref().expect("installed file has no hash");
                             let file = File::open(&path)?;
                             let reader = std::io::BufReader::new(file);

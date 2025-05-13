@@ -1,6 +1,6 @@
 [package]
 name = "bpm"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -44,6 +44,7 @@ walkdir = { workspace = true }
 wild = { workspace = true }
 zstd = { workspace = true, features = ["zstdmt"] }
 indexmap = { version = "2.7.1", features = ["serde"] }
+filetime = "0.2.25"
 
 [features]
 default = ["pack", "rustls", "swiss"]
