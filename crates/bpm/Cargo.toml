@@ -1,6 +1,6 @@
 [package]
 name = "bpm"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -39,7 +39,6 @@ tar = { workspace = true }
 toml = { workspace = true, features = ["preserve_order"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-version-compare = { workspace = true }
 walkdir = { workspace = true }
 wild = { workspace = true }
 zstd = { workspace = true, features = ["zstdmt"] }

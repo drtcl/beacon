@@ -1,6 +1,6 @@
 [package]
 name = "swiss"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -10,13 +10,13 @@ name = "swiss"
 name = "swiss"
 
 [dependencies]
+version.path = "../version"
+package.path = "../package"
 anyhow.workspace = true
 blake3.workspace = true
 camino.workspace = true
 clap.workspace = true
 tar.workspace = true
-version.path = "../version"
-package.path = "../package"
 wild.workspace = true
 zstd = {workspace = true, features = ["zstdmt"] }
 

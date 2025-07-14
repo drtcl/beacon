@@ -203,9 +203,49 @@ Package file naming follows this format: `<pkg_name>_<version>.bpm`
 
 Every package must be versioned.
 
-**bpm** prefers using [semantic versioning](https://semver.org) but other versioning schemes will work as well.
+**bpm** prefers using [semantic versioning](https://semver.org) but other versioning formats will work as well.
 For a given package, version format should stay consistent from one version to the next.
-Version formats other than semver are compared using a best-effort approach using lexicographic ordering. [[rules]](https://docs.rs/version-compare/latest/version_compare/)
+
+Note: To support comparing arbitrary version formats, bpm differs slightly differs from Semver ordering:
+
+    bpm:                               Semver:
+      1.0
+    < 1.0.0-7-2      (7, 2)               1.0.0-7.2      (7, 2)
+    < 1.0.0-7-10     (7, 10)            < 1.0.0-7.10     (7, 10)
+    < 1.0.0-7.2      ((7, 2))           < 1.0.0-7-10     "7-10"
+    < 1.0.0-7.10     ((7, 10))          < 1.0.0-7-2      "7-2"
+    < 1.0.0                             < 1.0.0
+    < 1.0.0+2-abc    (2, "abc")        == 1.0.0+10-abc   ("10-abc")
+    < 1.0.0+10-abc   (10, "abc")       == 1.0.0+2-abc    ("2-abc")
+    < 1.0.0.0
+    < 2.0
+    < 2.0.0-7-2      (7, 2)             < 2.0.0-7.10     (7, 10)
+    < 2.0.0-7-10     (7, 10)            < 2.0.0-7.2-10   (7, "2-10")
+    < 2.0.0-7.2-2    ((7, 2), 2)        < 2.0.0-7.2-2    (7, "2-2")
+    < 2.0.0-7.2-10   ((7, 2), 10)       < 2.0.0-7.2-A    (7, "2-A")
+    < 2.0.0-7.2-A    ((7, 2), "A")      < 2.0.0-7.2-Z    (7, "2-Z")
+    < 2.0.0-7.2-Z    ((7, 2), "Z")      < 2.0.0-7.2-a    (7, "2-a")
+    < 2.0.0-7.2-a    ((7, 2), "a")      < 2.0.0-7.2-z    (7, "2-z")
+    < 2.0.0-7.2-z    ((7, 2), "z")      < 2.0.0-7.a      (7. "a")
+    < 2.0.0-7.10     ((7, 10))          < 2.0.0-7-10     ("7-10")
+    < 2.0.0-7.a      ((7, "a"))         < 2.0.0-7-2      ("7-2")
+    < 2.0.0                             < 2.0.0
+    < 2.0.0.0
+
+Version formats other than semver are compared using a best-effort approach using lexicographic ordering.
+
+    General format:
+      core
+      core "-" prerelease
+      core "+" build
+      core "-" prerelease "+" build
+
+    General rules:
+      1. additional parts are split on "-" first, then split on ".".
+      2. More parts is greater, e.g.: 7-2-10 < 7.2-10 because (7, 2, 10) < ((7, 2), 10) because 7 < (7, 2)
+      3. numeric is lesser than non-numeric. e.g.: 1.0.0-6.10 < 1.0.0-6.abc
+      4. prerelease is lesser than non-prerelease
+      5. non-build is lesser than build
 
 ### Channels
 If channels are defined for a package, the channel name can be used when installing a package.

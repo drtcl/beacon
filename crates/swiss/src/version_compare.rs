@@ -11,6 +11,13 @@ pub fn args() -> Command {
         .arg(arg!(versions: <version>... "Versions to compare and sort"))
         .arg(arg!(--"skip-invalid" "Skip invalid versions"))
         .arg(arg!(--semver "Require semver versions"))
+        .arg(arg!(--ascending "output in ascending order")
+            .overrides_with("descending")
+        )
+        .arg(arg!(--descending "output in descending order (default)")
+            .overrides_with("ascending")
+        )
+
 }
 
 pub fn main(matches: &clap::ArgMatches) -> Result<()> {
@@ -18,6 +25,8 @@ pub fn main(matches: &clap::ArgMatches) -> Result<()> {
     let versions = matches.get_many::<String>("versions").context("version expected")?;
     let semver = matches.get_flag("semver");
     let skip_invalid = matches.get_flag("skip-invalid");
+
+    let descending = !matches.get_flag("ascending");
 
     let mut versions = versions.map(|v| version::Version::new(v)).collect::<Vec<_>>();
 
@@ -45,7 +54,23 @@ pub fn main(matches: &clap::ArgMatches) -> Result<()> {
     }
 
     versions.sort();
-    versions.reverse();
+    versions.dedup();
+
+    // // debug: assert that all versions compare correctly to all other versions
+    // for i in 0..versions.len() {
+    //     for j in 0..versions.len() {
+    //         if j < i {
+    //             assert!(versions[i] > versions[j]);
+    //         }
+    //         if j > i {
+    //             assert!(versions[i] < versions[j]);
+    //         }
+    //     }
+    // }
+
+    if descending {
+        versions.reverse();
+    }
 
     for v in versions {
         println!("{}", v);
@@ -53,4 +78,3 @@ pub fn main(matches: &clap::ArgMatches) -> Result<()> {
 
     Ok(())
 }
-

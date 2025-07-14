@@ -7,6 +7,9 @@ edition = "2021"
 workspace = true
 
 [dependencies]
+bpm_version_compare.path = "../bpm_version_compare"
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
-version-compare = { workspace = true }
+
+[dev-dependencies]
+version-compare = "0.2.0"

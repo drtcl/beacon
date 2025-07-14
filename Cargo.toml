@@ -6,6 +6,7 @@ members = [
     "crates/bpmd",
     "crates/bpmpack",
     "crates/bpmutil",
+    "crates/bpm_version_compare",
     "crates/fssearch",
     "crates/hashdir",
     "crates/httpsearch",
@@ -64,7 +65,6 @@ toml = "0.8.12"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 uuid = { version = "1.8.0", features = ["v4"] }
-version-compare = "0.2.0"
 walkdir = "2.5.0"
 wild = "2.2.1"
 zstd = "0.13.1"
