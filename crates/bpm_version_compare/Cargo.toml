@@ -15,4 +15,23 @@ path = "src/main.rs"
 semver = { version = "1.0.26", optional = true }
 
 [features]
+default = ["lazy-mess"]
+
+# A mess DOES NOT include the number it began in
+# example:
+# 3.14.0a         -> ((3,14,0), "a")
+# 3.14.0rc1+amd64 -> ((3,14,0), "rc1+amd64")
+lazy-mess = []
+
+# A mess DOES include the number it began in
+# example:
+# 3.14.0a         -> ((3,14), ".0a")
+# 3.14.0rc1+amd64 -> ((3,14), ".0rc1+amd64")
+eager-mess = []
+
+# (experimental, do no use) enforce semver rules on version strings that are valid semver
 semver = ["dep:semver"]
+
+# special "dict" ordering string compare:   x9y < x10y < x11y
+# where the normal ascii ordering would be: x10y < x11y < x9y
+dict = []

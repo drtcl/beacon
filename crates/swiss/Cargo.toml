@@ -1,6 +1,6 @@
 [package]
 name = "swiss"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -12,10 +12,12 @@ name = "swiss"
 [dependencies]
 version.path = "../version"
 package.path = "../package"
+bpm_version_compare.path = "../bpm_version_compare"
 anyhow.workspace = true
 blake3.workspace = true
 camino.workspace = true
 clap.workspace = true
+serde_json.workspace = true
 tar.workspace = true
 wild.workspace = true
 zstd = {workspace = true, features = ["zstdmt"] }

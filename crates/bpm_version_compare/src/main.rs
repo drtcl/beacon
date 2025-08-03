@@ -9,6 +9,7 @@ fn main() {
 
     versions.sort();
     versions.dedup();
+    versions.reverse();
 
     for v in versions {
         println!("{}", v.as_str());

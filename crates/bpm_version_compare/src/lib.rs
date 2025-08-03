@@ -151,6 +151,12 @@
 //          | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
 
 
+
+#[cfg(not(any(feature="eager-mess", feature="lazy-mess")))]
+compile_error!("feature eager-mess or lazy-mess required");
+#[cfg(all(feature="eager-mess", feature="lazy-mess"))]
+compile_error!("Use only one of eager-mess or lazy-mess required");
+
 const NORMAL_SEPS: &[char] = &['.', '-', '+'];
 
 fn is_normal_sep(c: char) -> bool {
@@ -215,6 +221,97 @@ fn eq_to_none(v: std::cmp::Ordering) -> Option<std::cmp::Ordering> {
         return None;
     }
     Some(v)
+}
+
+#[cfg(not(feature="dict"))]
+fn str_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.cmp(b)
+}
+
+#[derive(Clone)]
+pub struct DictIter<'a> {
+    s: &'a str,
+}
+pub fn dict_iter<'a>(s: &'a str) -> DictIter<'a> {
+    DictIter { s }
+}
+impl<'a> Iterator for DictIter<'a> {
+    type Item = (&'a str, bool);
+    fn next(&mut self) -> Option<Self::Item> {
+
+        // if the first char is numeric, chop off all leading consecutive numerics
+
+        if !self.s.is_empty() {
+            let mut first = true;
+            let mut part_is_numeric = false;
+            for (idx, c) in self.s.chars().enumerate() {
+                let numeric = c.is_ascii_digit();
+                if first {
+                    part_is_numeric = numeric;
+                    first = false;
+                } else {
+                    if part_is_numeric == numeric {
+                        // good, include it
+                    } else {
+                        // mismatch, return what we had, update internal string ref
+                        let part = &self.s[0..idx];
+                        self.s = &self.s[idx..];
+                        return Some((part, part_is_numeric));
+                    }
+                }
+            }
+            // if here, then we've scanned the entire string and
+            // it is entirely numeric or non-numeric
+            let part = self.s;
+            self.s = &self.s[0..0];
+            return Some((part, part_is_numeric));
+        }
+        None
+    }
+}
+
+#[cfg(feature="dict")]
+fn str_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    str_dict_cmp(a, b)
+}
+
+#[cfg(feature="dict")]
+fn str_dict_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+
+    //eprintln!("dict compare\n  {a}\n  {b}");
+
+    let mut a_parts = dict_iter(a).map(|(s, numeric)| (s, numeric.then(|| s.parse::<u64>().ok()).flatten()));
+    let mut b_parts = dict_iter(b).map(|(s, numeric)| (s, numeric.then(|| s.parse::<u64>().ok()).flatten()));
+
+    loop {
+        match (a_parts.next(), b_parts.next()) {
+            (None, None) => {
+                return std::cmp::Ordering::Equal;
+            }
+            (None, Some(_)) => {
+                return std::cmp::Ordering::Less;
+            }
+            (Some(_), None) => {
+                return std::cmp::Ordering::Greater;
+            }
+            (Some((sa, na)), Some((sb, nb))) => {
+                match (na, nb) {
+                    (None, Some(_)) |
+                    (Some(_), None) |
+                    (None, None) => {
+                        if let Some(ret) = eq_to_none(sa.cmp(sb)) {
+                            return ret;
+                        }
+                    }
+                    (Some(left), Some(right)) => {
+                        if let Some(ret) = eq_to_none(left.cmp(&right)) {
+                            return ret;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn scan_cmp(v1: &str, v2: &str) -> std::cmp::Ordering {
@@ -330,6 +427,33 @@ fn map_to_numeric<'a>(s: Option<&'a str>) -> Option<NumericNonNumeric<'a>> {
     })
 }
 
+// "a.b-c.d" -> "(("a", "b"), ("c", "d"))"
+// "a-b.c-d" -> "(("a"), ("b", "c"), ("d"))"
+pub fn explain_parts(s: &str, mess: bool) -> String {
+
+    let mut exp = String::new();
+    exp.push('(');
+    s.split(|c| (mess && is_sep(c)) || c == '-').for_each(|o_part| {
+        exp.push('(');
+        o_part.split('.').for_each(|i_part| {
+            exp.push('"');
+            exp.push_str(i_part);
+            exp.push('"');
+            exp.push(',');
+            exp.push(' ');
+        });
+        exp.pop();
+        exp.pop();
+        exp.push(')');
+        exp.push(',');
+        exp.push(' ');
+    });
+    exp.pop();
+    exp.pop();
+    exp.push(')');
+    exp
+}
+
 // This is used for prerelease and build strings
 //
 // first order: comparing on parts separated by '-'
@@ -399,6 +523,7 @@ fn part_cmp(v1: &str, v2: &str) -> std::cmp::Ordering {
                     if n1 != n2 {
                         return n1.cmp(&n2);
                     }
+                    // tie breaker for leading zeros (007 < 7)
                     tie_breaker = tie_breaker.or_else(|| eq_to_none(raw1.cmp(raw2)));
                 }
                 (Some(NumericNonNumeric::NonNumeric(_)), Some(NumericNonNumeric::Numeric{..})) => {
@@ -413,8 +538,8 @@ fn part_cmp(v1: &str, v2: &str) -> std::cmp::Ordering {
                 }
                 (Some(NumericNonNumeric::NonNumeric(left)), Some(NumericNonNumeric::NonNumeric(right))) => {
                     // both non-numeric
-                    if left != right {
-                        return left.cmp(right);
+                    if let Some(ret) = eq_to_none(str_cmp(left, right)) {
+                        return ret;
                     }
                 }
             }
@@ -476,8 +601,8 @@ fn mess_cmp(v1: &str, v2: &str) -> std::cmp::Ordering {
                     }
                     (Err(_), Err(_)) => {
                         // both non-numeric
-                        if part1 != part2 {
-                            return part1.cmp(part2);
+                        if let Some(ret) = eq_to_none(str_cmp(part1, part2)) {
+                            return ret;
                         }
                     }
                 }
@@ -498,7 +623,7 @@ fn mess_cmp(v1: &str, v2: &str) -> std::cmp::Ordering {
         return tie_breaker;
     }
 
-    v1.cmp(v2)
+    str_cmp(v1, v2)
 }
 
 // --- ScanIterator --------------------------------------------------
@@ -523,7 +648,6 @@ enum ScanStage {
     Mess = 3,
     Done = 4,
 }
-
 
 pub struct ScanIterator<'a> {
     v: &'a str,
@@ -598,12 +722,26 @@ impl<'a> Iterator for ScanIterator<'a> {
                     full_part = Some(&self.v[part_start_idx..=idx]);
                 }
 
+
+                // example: full string = "3.14.0a"
+                //             mess starts at ".0a"
+                #[cfg(feature="eager-mess")]
                 if in_part && !cur_is_number {
                     // hit a non-numeric character, that's a mess
                     self.stage = ScanStage::Done;
                     let mess_start = self.mess_start.unwrap_or(part_start_idx);
                     let mess = &self.v[mess_start..];
                     return Some(ScanToken::Mess(mess));
+                }
+
+                // example: full string = "3.14.0a"
+                //             mess starts at   "a"
+                #[cfg(feature="lazy-mess")]
+                if in_part && !cur_is_number {
+                    // hit a non-numeric character, that's a mess
+                    self.stage = ScanStage::Mess;
+                    full_part = Some(&self.v[part_start_idx..idx]);
+                    self.mess_start = Some(idx);
                 }
 
                 if let Some(this_part) = full_part {
@@ -676,6 +814,16 @@ pub fn scan_it<'a>(v: &'a str) -> ScanIterator<'a> {
         idx: 0,
         stage: ScanStage::Nums,
         mess_start: None,
+    }
+}
+
+pub trait ScanIt {
+    fn scan_it(&self) -> ScanIterator;
+}
+
+impl ScanIt for String {
+    fn scan_it(&self) -> ScanIterator {
+        scan_it(self.as_str())
     }
 }
 
@@ -788,7 +936,12 @@ mod test {
 
     #[test]
     fn mess() {
-        //assert!(is_mess("a.b.c"));
+
+        // note:  this is a mess if it is a full version string,
+        // it is not identified as a mess by is_mess() because this could be a
+        // valid prerelease or build part
+        assert!(!is_mess("a.b.c"));
+
         assert!(is_mess(".1.2"));
         assert!(is_mess("1..2"));
         assert!(is_mess("1=2"));
@@ -809,6 +962,37 @@ mod test {
         let v1 = VersionRef::new("v1.2.3.4.5-7-2-gc3d4+extra-info");
         let v2 = VersionRef::new( "1.2.3.4.5-7-10-ga1b2+extra-info");
         assert!(v1 < v2);
+    }
+
+    fn assert_order(versions: &[&str]) {
+
+        for (i, s1) in versions.iter().enumerate() {
+            for s2 in versions.iter().skip(i+1) {
+
+                println!("s1: {s1}");
+                println!("s2: {s2}");
+
+                assert!(matches!(scan_cmp(s1, s2), std::cmp::Ordering::Less));
+                assert!(matches!(scan_cmp(s2, s1), std::cmp::Ordering::Greater));
+
+                let v1 = VersionRef::new(s1);
+                let v2 = VersionRef::new(s2);
+                assert!(v1 < v2);
+                assert!(v2 > v1);
+
+                let vo1 = VersionOwned(s1.to_string());
+                let vo2 = VersionOwned(s2.to_string());
+                assert!(vo1 < vo2);
+                assert!(vo2 > vo1);
+
+                #[cfg(feature="semver")]
+                if let Ok(sv1) = semver::Version::parse(s1) {
+                    if let Ok(sv2) = semver::Version::parse(s2) {
+                        assert!(sv1 < sv2);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -868,34 +1052,45 @@ mod test {
             "2.0.0-20-1",
             "2.0.0-20-1+1",
             "2.0.0-20-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-20-2+10",
+            #[cfg(not(feature="semver"))]
             "2.0.0-20-10",
+            #[cfg(not(feature="semver"))]
             "2.0.0-20-10+2",
 
             // ascii ordering
             "2.0.0-30-A-1",
             "2.0.0-30-A-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-30-A-10",
             "2.0.0-30-B-1",
             "2.0.0-30-B-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-30-B-10",
             "2.0.0-30-a-1",
             "2.0.0-30-a-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-30-a-10",
             "2.0.0-30-b-1",
             "2.0.0-30-b-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-30-b-10",
             "2.0.0-A-1",
             "2.0.0-A-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-A-10",
             "2.0.0-B-1",
             "2.0.0-B-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-B-10",
             "2.0.0-a-1",
             "2.0.0-a-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-a-10",
             "2.0.0-b-1",
             "2.0.0-b-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0-b-10",
 
             "2.0.0",
@@ -903,6 +1098,7 @@ mod test {
             "2.0.0+2",
             "2.0.0+2-1",
             "2.0.0+2-2",
+            #[cfg(not(feature="semver"))]
             "2.0.0+2-10",
             "2.0.0.0",
             "2.1-12-1+1",
@@ -931,6 +1127,18 @@ mod test {
             "3.2.1.1+1-10",
             "3.2.1.1+1.2-10",
             "3.2.1.1+1.2.3-10",
+
+            // python versions including prereleases
+            "3.12.0",
+            "3.13.0",
+            "3.13.1",
+            "3.14.0a1",
+            "3.14.0a2",
+            "3.14.0b1",
+            "3.14.0b2",
+            "3.14.0rc1",
+            "3.14.0",
+            "3.14.1",
 
             // non-numeric parts are ordered by ascii
             "4.1.1-BRANCH",
@@ -976,8 +1184,12 @@ mod test {
 
             // mess - messy versions are always lesser than non-messy
             "6.0",
+
+            #[cfg(feature="eager-mess")]
             "6.1.2a", // 2a is messy, this is 6.1 and "2a"
+            #[cfg(feature="eager-mess")]
             "6.1.2a-2", // a mess does not have prerel or build
+            #[cfg(feature="eager-mess")]
             "6.1.2a-10",
             "6.1",
             "6.1.2:5-1",
@@ -985,6 +1197,12 @@ mod test {
             "6.1.2:5-10",
             "6.1.2:3a",
             "6.1.2:4a",
+            #[cfg(feature="lazy-mess")]
+            "6.1.2a", // 2a is messy, this is 6.1 and "2a"
+            #[cfg(feature="lazy-mess")]
+            "6.1.2a-2", // a mess does not have prerel or build
+            #[cfg(feature="lazy-mess")]
+            "6.1.2a-10",
             "6.1.2",
             "6.2++0-rc1",
             "6.003.1a+2025.06.20+4",
@@ -994,8 +1212,11 @@ mod test {
             "7.0.0",
             "7.0.1+1::a",
             "7.0.1-1::b",
-            "7.0.1.1a",
+            #[cfg(feature="eager-mess")]
+            "7.0.1.1a",    // ((7,0,1), ".1a")
             "7.0.1",
+            #[cfg(feature="lazy-mess")]
+            "7.0.1.1a",    // ((7,0,1,1), "a")
 
             "7.1.1+1::a",  // ((7,1,1), "+1::a")
             "7.01.1-1::a", // ((7.1.1), "-1::a")
@@ -1003,10 +1224,12 @@ mod test {
             // numeric parts separated by - are still compared numerically
             "7.1.2-1-1",
             "7.1.2-1-2",
+            #[cfg(not(feature="semver"))]
             "7.1.2-1-10",
             "7.1.2-1-20",
             "7.1.2-1-etc-1",
             "7.1.2-1-etc-2",
+            #[cfg(not(feature="semver"))]
             "7.1.2-1-etc-10",
             "7.1.2-1-etc-20",
 
@@ -1059,37 +1282,53 @@ mod test {
             "14.1-1-1.02",    // ((14, 1), ( 1, (1,   02)))
         ];
 
-        for (i, s1) in versions.iter().enumerate() {
-            for s2 in versions.iter().skip(i+1) {
+        assert_order(&versions);
+    }
 
-                assert!(matches!(scan_cmp(s1, s2), std::cmp::Ordering::Less));
-                assert!(matches!(scan_cmp(s2, s1), std::cmp::Ordering::Greater));
+    #[cfg(feature="dict")]
+    #[test]
+    fn dict_order() {
 
-                let v1 = VersionRef::new(s1);
-                let v2 = VersionRef::new(s2);
-                assert!(v1 < v2);
-                assert!(v2 > v1);
 
-                let vo1 = VersionOwned(s1.to_string());
-                let vo2 = VersionOwned(s2.to_string());
-                assert!(vo1 < vo2);
-                assert!(vo2 > vo1);
+        let versions = [
+            "15.0-trial-1",
+            "15.0-trial-2",
+            "15.0-trial-10",
+            "15.0-trial-22",
+            "15.0-trial-210",
 
-                #[cfg(feature="semver")]
-                if let Ok(sv1) = semver::Version::parse(s1) {
-                    if let Ok(sv2) = semver::Version::parse(s2) {
-                        if !(sv1 < sv2) {
-                            dbg!(&s1);
-                            dbg!(&s2);
-                            dbg!(&sv1);
-                            dbg!(&sv2);
-                            dbg!(sv1.cmp(&sv2));
-                        }
-                        assert!(sv1 < sv2);
-                    }
-                }
-            }
-        }
+            "15.0-trial1",
+            "15.0-trial2",
+            "15.0-trial10",
+            "15.0-trial22",
+            "15.0-trial210",
+        ];
+
+        assert_order(&versions);
+    }
+
+    #[cfg(not(feature="dict"))]
+    #[test]
+    fn non_dict_order() {
+
+        // numbers should be split from strings if they need to be ordered:
+        // notice these are not in numeric order, they are in ascii order
+
+        let versions = [
+            "15.0-trial-1",
+            "15.0-trial-2",
+            "15.0-trial-10",
+            "15.0-trial-22",
+            "15.0-trial-210",
+
+            "15.0-trial1",
+            "15.0-trial10",
+            "15.0-trial2",
+            "15.0-trial210",
+            "15.0-trial22",
+        ];
+
+        assert_order(&versions);
     }
 }
 
