@@ -8,8 +8,6 @@
 //! The reserved portion is for future possibility of including architecture or package types in
 //! the filename. This format mostly follows that of .deb file packages.
 
-#![feature(let_chains)]
-
 use camino::{Utf8Path, Utf8PathBuf};
 use anyhow::Context;
 use anyhow::Result;

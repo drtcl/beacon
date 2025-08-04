@@ -1,5 +1,3 @@
-#![feature(let_chains)]
-
 // bpm version compare
 //
 // --- General rules ---
@@ -818,11 +816,11 @@ pub fn scan_it<'a>(v: &'a str) -> ScanIterator<'a> {
 }
 
 pub trait ScanIt {
-    fn scan_it(&self) -> ScanIterator;
+    fn scan_it(&self) -> ScanIterator<'_> ;
 }
 
 impl ScanIt for String {
-    fn scan_it(&self) -> ScanIterator {
+    fn scan_it(&self) -> ScanIterator<'_> {
         scan_it(self.as_str())
     }
 }

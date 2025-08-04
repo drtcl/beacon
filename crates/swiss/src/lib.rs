@@ -1,5 +1,3 @@
-#![feature(let_chains)]
-
 use clap::Command;
 use anyhow::Result;
 

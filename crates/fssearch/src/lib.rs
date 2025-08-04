@@ -1,5 +1,4 @@
 //#![feature(extract_if)]
-//#![feature(let_chains)]
 
 use anyhow::Result;
 use camino::Utf8PathBuf;
