@@ -242,20 +242,18 @@ impl<'a> Iterator for DictIter<'a> {
         if !self.s.is_empty() {
             let mut first = true;
             let mut part_is_numeric = false;
-            for (idx, c) in self.s.chars().enumerate() {
+            for (idx, c) in self.s.char_indices() {
                 let numeric = c.is_ascii_digit();
                 if first {
                     part_is_numeric = numeric;
                     first = false;
+                } else if part_is_numeric == numeric {
+                    // good, include it
                 } else {
-                    if part_is_numeric == numeric {
-                        // good, include it
-                    } else {
-                        // mismatch, return what we had, update internal string ref
-                        let part = &self.s[0..idx];
-                        self.s = &self.s[idx..];
-                        return Some((part, part_is_numeric));
-                    }
+                    // mismatch, return what we had, update internal string ref
+                    let part = &self.s[0..idx];
+                    self.s = &self.s[idx..];
+                    return Some((part, part_is_numeric));
                 }
             }
             // if here, then we've scanned the entire string and
@@ -652,6 +650,8 @@ pub struct ScanIterator<'a> {
     idx: usize,
     stage: ScanStage,
     mess_start: Option<usize>,
+    consumed: usize,
+    char_count: usize,
 }
 
 impl<'a> Iterator for ScanIterator<'a> {
@@ -676,14 +676,16 @@ impl<'a> Iterator for ScanIterator<'a> {
             let mut part_start_idx = 0;
             let mut in_part = false;
 
-            for (idx, c) in self.v.chars().enumerate().skip(self.idx) {
+            for (nth, (idx, c)) in self.v.char_indices().enumerate().skip(self.consumed) {
 
                 self.idx = idx;
+                self.consumed = nth + 1;
+
                 prev_sep = cur_sep;
                 cur_sep = is_sep(c);
                 let cur_is_number = c.is_ascii_digit();
 
-                let is_last_char = idx == (self.v.len() - 1);
+                let is_last_char = (1+nth) == self.char_count;
 
                 // 2 adjacent seps, that's a mess
                 if prev_sep && cur_sep {
@@ -744,7 +746,7 @@ impl<'a> Iterator for ScanIterator<'a> {
 
                 if let Some(this_part) = full_part {
                     if let Ok(n) = this_part.parse::<u64>() {
-                        self.idx += 1;
+                        self.idx += c.len_utf8();
                         return Some(ScanToken::Num{n, raw: this_part});
                     } else {
                         self.stage = ScanStage::Done;
@@ -801,28 +803,26 @@ impl<'a> Iterator for ScanIterator<'a> {
     }
 }
 
+impl<'a> ScanIterator<'a> {
+    fn new(v: &'a str) -> ScanIterator<'a> {
+        Self {
+            v,
+            idx: 0,
+            stage: ScanStage::Nums,
+            mess_start: None,
+            consumed: 0,
+            char_count: v.chars().count(),
+        }
+    }
+}
+
 pub fn scan_it<'a>(v: &'a str) -> ScanIterator<'a> {
 
     let v = v.strip_prefix("v")
              .or_else(|| v.strip_prefix("V"))
              .unwrap_or(v);
 
-    ScanIterator {
-        v,
-        idx: 0,
-        stage: ScanStage::Nums,
-        mess_start: None,
-    }
-}
-
-pub trait ScanIt {
-    fn scan_it(&self) -> ScanIterator<'_> ;
-}
-
-impl ScanIt for String {
-    fn scan_it(&self) -> ScanIterator<'_> {
-        scan_it(self.as_str())
-    }
+    ScanIterator::new(v)
 }
 
 // ---/ScanIterator --------------------------------------------------

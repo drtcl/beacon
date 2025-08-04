@@ -2,7 +2,7 @@ use bpm_version_compare::*;
 
 fn main() {
 
-    let mut versions : Vec<_> = std::env::args().skip(1).map(|s| VersionOwned(s)).collect();
+    let mut versions : Vec<_> = std::env::args().skip(1).map(VersionOwned).collect();
 
     #[cfg(feature="semver")]
     versions.retain(|v| semver::Version::parse(v.as_str()).is_ok());
