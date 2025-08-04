@@ -1,6 +1,3 @@
-#![feature(let_chains)]
-#![feature(iter_array_chunks)]
-
 // take a list of files
 // save them into a data tarball
 // hash the tarball
@@ -642,11 +639,15 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
 
     let description = matches.get_one::<String>("description").cloned();
 
-    let kv = matches.get_many::<String>("kv").map(|kv| {
-        kv.array_chunks::<2>()
-          .map(|kv| (kv[0].to_owned(), kv[1].to_owned()))
-          .collect::<std::collections::BTreeMap<String, String>>()
-    }).unwrap_or_default();
+    // args: `--kv a=b --kv c=d`
+    // first into ["a", "b", "c", "d"]
+    // then into  {"a": "b", "c": "d"}
+    let kv = matches.get_many::<String>("kv")
+        .map(|vals| vals.collect::<Vec<&String>>())
+        .unwrap_or_else(|| Vec::new())
+        .chunks_exact(2)
+        .map(|kv| (kv[0].clone(), kv[1].clone()))
+        .collect::<std::collections::BTreeMap<String, String>>();
 
     let deps: Vec<(String, Option<String>)> = matches.get_many::<String>("depend")
         .map(|refs| refs.into_iter().map(|s| s.to_string()).collect::<Vec<_>>())
