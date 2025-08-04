@@ -644,7 +644,7 @@ pub fn make_package(matches: &clap::ArgMatches) -> Result<()> {
     // then into  {"a": "b", "c": "d"}
     let kv = matches.get_many::<String>("kv")
         .map(|vals| vals.collect::<Vec<&String>>())
-        .unwrap_or_else(|| Vec::new())
+        .unwrap_or_default()
         .chunks_exact(2)
         .map(|kv| (kv[0].clone(), kv[1].clone()))
         .collect::<std::collections::BTreeMap<String, String>>();

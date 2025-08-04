@@ -38,6 +38,7 @@ lto = true
 needless_return = "allow"
 let_and_return = "allow"
 too_many_arguments = "allow"
+collapsible_if = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.82"

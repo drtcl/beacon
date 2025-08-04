@@ -389,8 +389,8 @@ pub fn package_integrity_check_full(
 
     pkg_file.rewind()?;
 
-    if file_name.is_none() && known_hash.is_some() {
-        if known_hash.unwrap() == ret.file_hash {
+    if file_name.is_none() && let Some(known_hash) = known_hash {
+        if known_hash == ret.file_hash {
             // full file hash matched, assume everything else is good
             ret.meta_ok = true;
             ret.data_ok = true;
@@ -418,8 +418,8 @@ pub fn package_integrity_check_full(
         }
     }
 
-    if known_hash.is_some() {
-        if known_hash.unwrap() == ret.file_hash {
+    if let Some(known_hash) = known_hash {
+        if known_hash == ret.file_hash {
             ret.data_hash = metadata.data_hash.context("metadata has no data hash")?;
             // assume the rest is good
             ret.data_ok = true;
