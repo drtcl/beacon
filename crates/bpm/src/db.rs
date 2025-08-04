@@ -4,24 +4,24 @@ use crate::*;
 
 //const DB_VERSION : u32 = 1;
 
-type HashString = String;
+//type HashString = String;
 //type FilePath = String;
-type FilePath = Utf8PathBuf;
+//type FilePath = Utf8PathBuf;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-enum FileType {
-    File,
-    Link,
-    Dir,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FileInfo {
-    filetype: FileType,
-    path: FilePath,
-    hash: HashString,
-    attrs: Vec<String>,
-}
+//#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+//enum FileType {
+//    File,
+//    Link,
+//    Dir,
+//}
+//
+//#[derive(Clone, Debug, Serialize, Deserialize)]
+//pub struct FileInfo {
+//    filetype: FileType,
+//    path: FilePath,
+//    hash: HashString,
+//    attrs: Vec<String>,
+//}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DbPkg {

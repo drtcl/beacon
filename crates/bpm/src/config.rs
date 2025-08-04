@@ -702,7 +702,7 @@ mod test {
             assert_eq!(txt, "x x x windows x x x");
         }
 
-        std::env::set_var("BPM_TEST_VALUE", "foo");
+        unsafe { std::env::set_var("BPM_TEST_VALUE", "foo"); }
         let mut txt = String::from("x x x ${ENV(BPM_TEST_VALUE)} x x x");
         config_replace(&mut txt);
         if cfg!(target_os="linux") {
@@ -710,8 +710,8 @@ mod test {
         }
         println!();
 
-        std::env::set_var("BPM_TEST_VALUE", "foo");
-        std::env::set_var("BPM_TEST_VALUE2", "bar");
+        unsafe { std::env::set_var("BPM_TEST_VALUE", "foo"); }
+        unsafe { std::env::set_var("BPM_TEST_VALUE2", "bar"); }
         let mut txt = String::from("x x x ${ENV(BPM_TEST_VALUE)} ${ENV(BPM_TEST_VALUE2)} x x x");
         config_replace(&mut txt);
         if cfg!(target_os="linux") {
@@ -719,7 +719,7 @@ mod test {
         }
         println!();
 
-        std::env::set_var("BPM_TEST_VALUE", "foo");
+        unsafe { std::env::set_var("BPM_TEST_VALUE", "foo"); }
         let mut txt = String::from("x x x ${ENV(BPM_TEST_MISSING)} x x x");
         config_replace(&mut txt);
         if cfg!(target_os="linux") {
@@ -727,9 +727,9 @@ mod test {
         }
         println!();
 
-        std::env::set_var("BPM_TEST_TRUE", "");
-        std::env::set_var("BPM_TEST_TRUE2", "1");
-        std::env::set_var("BPM_TEST_FALSE", "0");
+        unsafe { std::env::set_var("BPM_TEST_TRUE", ""); }
+        unsafe { std::env::set_var("BPM_TEST_TRUE2", "1"); }
+        unsafe { std::env::set_var("BPM_TEST_FALSE", "0"); }
         let mut txt = String::from("x x x ${ENV(BPM_TEST_TRUE):foo:bar}${ENV(BPM_TEST_TRUE2):FOO:BAR}${ENV(BPM_TEST_FALSE):baz:BAZ} x x x");
         config_replace(&mut txt);
         if cfg!(target_os="linux") {
@@ -737,9 +737,9 @@ mod test {
         }
         println!();
 
-        std::env::set_var("BPM_TEST_TRUE", "");
-        std::env::set_var("BPM_TEST_TRUE2", "1");
-        std::env::set_var("BPM_TEST_FALSE", "0");
+        unsafe { std::env::set_var("BPM_TEST_TRUE", ""); }
+        unsafe { std::env::set_var("BPM_TEST_TRUE2", "1"); }
+        unsafe { std::env::set_var("BPM_TEST_FALSE", "0"); }
         let mut txt = String::from("x x x ${ENV(BPM_TEST_TRUE)::bar}${ENV(BPM_TEST_TRUE2):FOO}${ENV(BPM_TEST_FALSE)::BAZ}${ENV(BPM_TEST_FALSE):BAZ} x x x");
         config_replace(&mut txt);
         if cfg!(target_os="linux") {

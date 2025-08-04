@@ -16,6 +16,8 @@ use std::io::Seek;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use bpmutil::MyLockFns;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -175,9 +177,9 @@ impl App {
         if self.lockfile.is_none() {
             if let Some(path) = &self.config.lockfile {
                 let file = bpmutil::open_lockfile(path)?;
-                if !file.try_lock().context("file lock")? {
+                if !file.my_try_lock().context("file lock")? {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    if !file.try_lock().context("file lock")? {
+                    if !file.my_try_lock().context("file lock")? {
                         eprintln!("waiting for file lock");
                         file.lock().context("file lock")?;
                     }
@@ -194,9 +196,9 @@ impl App {
         if self.lockfile.is_none() {
             if let Some(path) = &self.config.lockfile {
                 let file = bpmutil::open_lockfile(path)?;
-                if !file.try_lock_shared().context("file lock")? {
+                if !file.my_try_lock_shared().context("file lock")? {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    if !file.try_lock_shared().context("file lock")? {
+                    if !file.my_try_lock_shared().context("file lock")? {
                         eprintln!("waiting for file lock");
                         file.lock_shared().context("file lock")?;
                     }
@@ -2028,7 +2030,7 @@ impl App {
 
                     let mut lock_contended = false;
                     let lock_file = bpmutil::open_lockfile(&lock_path)?;
-                    if !lock_file.try_lock().context("file lock")? {
+                    if !lock_file.my_try_lock().context("file lock")? {
                         lock_contended = true;
                         tracing::debug!("[scan] [t{tid}] waiting for file lock");
                         lock_file.lock().context("file lock")?;
@@ -2107,7 +2109,7 @@ impl App {
                     && name.starts_with(TEMP_DOWNLOAD_PREFX) {
 
                     let fd = std::fs::File::open(&path);
-                    if let Ok(fd) = fd && let Ok(true) = fd.try_lock() {
+                    if let Ok(fd) = fd && let Ok(true) = fd.my_try_lock() {
                         tracing::trace!("removing {}", name);
                         let _ = fd.unlock();
                         drop(fd);
@@ -2646,7 +2648,7 @@ impl App {
 
                             let mut file = std::fs::OpenOptions::new().create(true).read(true).write(true).truncate(true).open(&temp_path)?;
 
-                            if let Ok(true) = file.try_lock() {
+                            if let Ok(true) = file.my_try_lock() {
                                 // good
                             } else {
                                 tracing::warn!("could not acquire lock on temp download file {}", temp_path);

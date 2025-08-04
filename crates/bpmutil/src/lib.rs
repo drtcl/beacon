@@ -123,6 +123,34 @@ pub fn open_lockfile(path: &Utf8Path) -> Result<File> {
     Ok(file)
 }
 
+// rust 1.88.0 changed the API of these functions
+// from -> Result<bool>
+// to   -> Result<(), TryLockError>
+//
+// I prefer to use the older API, so these wrappers convert the return type back to the older API.
+// We're going to stay this way until File locking is in +stable
+pub trait MyLockFns {
+    fn my_try_lock(&self) -> Result<bool, std::io::Error>;
+    fn my_try_lock_shared(&self) -> Result<bool, std::io::Error>;
+}
+
+impl MyLockFns for std::fs::File {
+    fn my_try_lock(&self) -> Result<bool, std::io::Error> {
+        match self.try_lock() {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+    fn my_try_lock_shared(&self) -> Result<bool, std::io::Error> {
+        match self.try_lock_shared() {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+}
+
 /// parse a string like "1h30m20s" into a duration
 pub fn parse_duration(s: &str) -> Result<Duration> {
 

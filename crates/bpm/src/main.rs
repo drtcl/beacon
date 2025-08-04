@@ -1,6 +1,4 @@
-#![feature(file_lock)]
 #![feature(iter_collect_into)]
-#![feature(let_chains)]
 #![feature(thread_id_value)]
 
 // ideas for future features

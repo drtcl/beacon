@@ -71,7 +71,7 @@ struct Link {
 
 impl Link {
     /// split out info parts of a link
-    fn version_info(&self) -> Option<VersionInfo> {
+    fn version_info(&self) -> Option<VersionInfo<'_>> {
         if let Some((_name, version, arch)) = package::split_parts(&self.text) {
             return Some(VersionInfo {
                 version,
